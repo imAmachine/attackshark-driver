@@ -187,7 +187,8 @@ char *as_ui_mouse_summary(const AsDevice *dev)
         g_string_append(s, dev->error);
         return g_string_free(s, FALSE);
     }
-    g_string_append(s, dev->online ? "связь есть" : "связь потеряна");
+    g_string_append(s, dev->online ? "связь есть"
+                                  : "спит или выключена");
     if (dev->battery > 0) {
         g_string_append_printf(s, " · заряд %d%%", dev->battery);
     }
