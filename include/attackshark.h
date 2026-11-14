@@ -261,4 +261,10 @@ uint8_t as_kb_deadzone_to_raw(double mm);
 /* ---------- misc ---------- */
 const char *as_strerror(int err);
 
+/* Human-readable names shared by the CLI and the GUI. */
+const char *as_mouse_model_name(unsigned pid);
+int as_light_mode_count(void);
+const char *as_light_mode_name(int mode);
+int as_light_mode_by_name(const char *name);
+
 #endif

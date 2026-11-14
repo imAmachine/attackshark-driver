@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Attack Shark
+GenericName=Device Manager
+Comment=Configure Attack Shark mice and keyboards
+Exec=attackshark-gui
+Icon=attackshark-gui
+Terminal=false
+Categories=Settings;HardwareSettings;
+Keywords=attackshark;mouse;keyboard;dpi;hidraw;polling;lighting;
+StartupNotify=true

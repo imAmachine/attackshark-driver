@@ -48,9 +48,11 @@
 ## Сборка и установка
 
 ```sh
-make            # соберёт ./attackshark, нужен только C-компилятор
+make            # соберёт ./attackshark (и GUI, если есть GTK4)
+make gui        # только GUI: ./attackshark-gui
 make test       # проверка кодеков DPI, частоты опроса и хода клавиш
 sudo make install
+sudo make install-gui     # бинарник, .desktop и иконка
 sudo udevadm control --reload && sudo udevadm trigger
 ```
 
@@ -58,7 +60,8 @@ sudo udevadm control --reload && sudo udevadm trigger
 (`/etc/udev/rules.d/99-attackshark.rules`) и юнит
 `/etc/systemd/system/attackshark.service`.
 
-Зависимостей нет: используется только `hidraw`, `ioctl` и `select`.
+У CLI зависимостей нет: используется только `hidraw`, `ioctl` и `select`.
+GUI требует GTK4 и libadwaita; если их нет, `make` просто собирает CLI.
 
 ## Быстрый старт
 
@@ -78,6 +81,24 @@ attackshark keyboard travel --actuation 1.5 --rt --rt-press 0.2 --deadzone 0.2
 ```
 
 Полный список: `attackshark --help`.
+
+## Графический интерфейс
+
+`attackshark-gui` — настройка тех же параметров мышкой, с живым состоянием
+устройства: список подключённых мышей и клавиатур, заряд и связь, частота
+опроса, DPI по этапам, LOD, debounce, motion sync/angle snap/ripple, а у
+клавиатуры — ещё и подсветка. Подсветка мыши в GUI не выводится: у части
+моделей (например, R11 Ultra) её физически нет, поэтому она остаётся
+командой `attackshark mouse light`.
+
+```sh
+make gui && ./attackshark-gui
+```
+
+GUI линкуется с тем же драйвером, что и CLI, поэтому оба инструмента
+одинаково видят устройства и настройки. Все обращения к hidraw идут через
+один фоновый поток, интерфейс не блокируется. Подробности архитектуры и
+того, как добавить новую настройку, — в `docs/GUI.md`.
 
 ## Профиль при загрузке
 
@@ -164,9 +185,13 @@ include/attackshark.h   API драйвера
 src/hidraw.c            поиск hidraw-узлов, feature/interrupt обмен
 src/mouse.c             протокол мыши (Control HUB)
 src/keyboard.c          протокол клавиатуры (GearHub)
+src/util.c              строки ошибок, названия моделей и режимов
 src/main.c              CLI
+src/gui/                GUI на GTK4 (воркер, реестр устройств, страницы)
 tests/test_codec.c      тесты кодеков
+data/                   .desktop и иконка GUI
 udev/, systemd/, etc/   установка и автозапуск
 docs/PROTOCOL.md        описание протоколов
+docs/GUI.md             архитектура GUI
 tools/                  скрипты, которыми протоколы разбирались
 ```

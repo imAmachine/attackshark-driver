@@ -13,42 +13,7 @@
 static int json_mode;
 static int optional_mode;
 
-static const char *light_mode_names[] = {
-    "off", "always-on", "breath", "neon", "wave", "ripple", "raindrop",
-    "snake", "press-action", "coverage", "sine-wave", "kaleidoscope",
-    "line-wave", "user-picture", "laser", "circle-wave", "dazzling",
-    "rain-down", "meteor", "press-action-off", "music-follow-3",
-    "screen-color", "music-follow-2", "train", "fireworks", "user-color",
-};
-
 static const char *mag_mode_names[] = { "comfort", "sensitive", "gaming", "custom" };
-
-static const char *light_mode_name(int mode)
-{
-    size_t n = sizeof(light_mode_names) / sizeof(light_mode_names[0]);
-
-    if (mode >= 0 && (size_t)mode < n) {
-        return light_mode_names[mode];
-    }
-    return "unknown";
-}
-
-static int light_mode_by_name(const char *name)
-{
-    char *end;
-    long v = strtol(name, &end, 0);
-    size_t n = sizeof(light_mode_names) / sizeof(light_mode_names[0]);
-
-    if (*end == 0 && end != name) {
-        return (int)v;
-    }
-    for (size_t i = 0; i < n; i++) {
-        if (strcmp(name, light_mode_names[i]) == 0) {
-            return (int)i;
-        }
-    }
-    return -1;
-}
 
 static int parse_bool(const char *s, int *value)
 {
@@ -85,18 +50,6 @@ static int parse_color(const char *s, uint8_t *r, uint8_t *g, uint8_t *b)
     *g = (uint8_t)(v >> 8);
     *b = (uint8_t)v;
     return 0;
-}
-
-static const char *mouse_model(unsigned pid)
-{
-    switch (pid) {
-    case 0xfb43:
-    case 0xfb44: return "R11 Ultra (2.4 GHz)";
-    case 0xf5f6: return "R11 Ultra (USB)";
-    case 0xf517:
-    case 0xf515: return "X11 Ultra";
-    default: return "Compx mouse";
-    }
 }
 
 /* Similar to getopt: look up "--name value" or "--name=value". */
@@ -151,7 +104,7 @@ static int cmd_list(void)
                    memmem(found[i].descriptor, found[i].descriptor_len,
                           "\x06\x02\xff", 3)) {
             kind = "mouse";
-            product = mouse_model(found[i].pid);
+            product = as_mouse_model_name(found[i].pid);
         }
         if (!kind) {
             continue;
@@ -208,8 +161,8 @@ static int cmd_mouse(int argc, char **argv)
                    "\"angle_snap\":%d,\"ripple\":%d,\"sleep\":%d,"
                    "\"light\":{\"mode\":%d,\"brightness\":%d,\"speed\":%d,"
                    "\"color\":\"%02x%02x%02x\",\"on\":%d},\"dpi\":[",
-                   mouse_model(m.hid.pid), m.hid.vid, m.hid.pid, m.cid, m.mid,
-                   m.type, st.online, st.config_valid, st.profile,
+                   as_mouse_model_name(m.hid.pid), m.hid.vid, m.hid.pid, m.cid,
+                   m.mid, m.type, st.online, st.config_valid, st.profile,
                    st.version_major, st.version_minor, st.dongle_version[0],
                    st.dongle_version[1], st.dongle_version[2], st.battery,
                    st.charging, st.battery_voltage, st.report_rate,
@@ -223,7 +176,7 @@ static int cmd_mouse(int argc, char **argv)
             }
             printf("]}\n");
         } else {
-            printf("device         %s\n", mouse_model(m.hid.pid));
+            printf("device         %s\n", as_mouse_model_name(m.hid.pid));
             printf("usb            %04x:%04x  %s\n", m.hid.vid, m.hid.pid, m.hid.path);
             printf("device id      cid %u mid %u type %u\n", m.cid, m.mid, m.type);
             if (st.version_valid) {
@@ -570,7 +523,7 @@ static int cmd_mouse(int argc, char **argv)
 
 static void print_kb_light(const struct as_kb_light *l)
 {
-    printf("mode        %d (%s)\n", l->mode, light_mode_name(l->mode));
+    printf("mode        %d (%s)\n", l->mode, as_light_mode_name(l->mode));
     printf("brightness  %d\n", l->brightness);
     printf("speed       %d\n", l->speed);
     printf("color       %02x%02x%02x\n", l->r, l->g, l->b);
@@ -701,7 +654,7 @@ static int cmd_keyboard(int argc, char **argv)
             if (st.light.valid) {
                 printf("light\n");
                 printf("  mode         %d (%s)\n", st.light.mode,
-                       light_mode_name(st.light.mode));
+                       as_light_mode_name(st.light.mode));
                 printf("  brightness   %d\n", st.light.brightness);
                 printf("  speed        %d\n", st.light.speed);
                 printf("  color        %02x%02x%02x\n", st.light.r, st.light.g,
@@ -722,7 +675,7 @@ static int cmd_keyboard(int argc, char **argv)
                     printf("{\"mode\":%d,\"name\":\"%s\",\"brightness\":%d,"
                            "\"speed\":%d,\"color\":\"%02x%02x%02x\","
                            "\"option\":%d,\"dazzle\":%d}\n",
-                           st.light.mode, light_mode_name(st.light.mode),
+                           st.light.mode, as_light_mode_name(st.light.mode),
                            st.light.brightness, st.light.speed, st.light.r,
                            st.light.g, st.light.b, st.light.option,
                            st.light.dazzle);
@@ -737,7 +690,7 @@ static int cmd_keyboard(int argc, char **argv)
                                      .brightness = 4, .option = 0, .dazzle = 1,
                                      .r = 0xff, .g = 0, .b = 0 };
             if (mode) {
-                int m = light_mode_by_name(mode);
+                int m = as_light_mode_by_name(mode);
                 if (m < 0) {
                     fprintf(stderr, "attackshark: unknown light mode '%s'\n", mode);
                     as_keyboard_close(&kb);
@@ -1039,8 +992,8 @@ static void usage(void)
         "  apply FILE                  run commands from FILE\n"
         "\n"
         "Light modes: ");
-    for (size_t i = 0; i < sizeof(light_mode_names) / sizeof(light_mode_names[0]); i++) {
-        printf("%s%s", i ? ", " : "", light_mode_names[i]);
+    for (int i = 0; i < as_light_mode_count(); i++) {
+        printf("%s%s", i ? ", " : "", as_light_mode_name(i));
     }
     printf("\n");
 }
