@@ -147,36 +147,46 @@ AdwSwitchRow *as_ui_switch_row(const char *title, const char *subtitle)
     return row;
 }
 
+/* The guard must be restored, not cleared: the setter is normally called from
+ * update_page(), which already holds it. Clearing it there let the following
+ * programmatic changes look like user input and write to the device. */
 void as_ui_combo_set(AdwComboRow *row, gboolean *guard, int index)
 {
+    gboolean previous = *guard;
+
     *guard = TRUE;
     adw_combo_row_set_selected(row, index >= 0 ? (guint)index
                                                : GTK_INVALID_LIST_POSITION);
-    *guard = FALSE;
+    *guard = previous;
 }
 
 void as_ui_spin_set(AdwSpinRow *row, gboolean *guard, double value)
 {
+    gboolean previous = *guard;
+
     *guard = TRUE;
     adw_spin_row_set_value(row, value);
-    *guard = FALSE;
+    *guard = previous;
 }
 
 void as_ui_switch_set(AdwSwitchRow *row, gboolean *guard, gboolean active)
 {
+    gboolean previous = *guard;
+
     *guard = TRUE;
     adw_switch_row_set_active(row, active);
-    *guard = FALSE;
+    *guard = previous;
 }
 
 void as_ui_color_set(GtkColorDialogButton *button, gboolean *guard,
                      const uint8_t rgb[3])
 {
+    gboolean previous = *guard;
     GdkRGBA rgba = as_ui_rgba_from_rgb(rgb);
 
     *guard = TRUE;
     gtk_color_dialog_button_set_rgba(button, &rgba);
-    *guard = FALSE;
+    *guard = previous;
 }
 
 char *as_ui_mouse_summary(const AsDevice *dev)
