@@ -1,0 +1,6 @@
+*.o
+attackshark
+tests/test_codec
+ref/
+core
+core.*

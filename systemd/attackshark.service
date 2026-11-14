@@ -1,0 +1,11 @@
+[Unit]
+Description=Apply the saved Attack Shark device profile
+After=multi-user.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/attackshark --optional apply /etc/attackshark.conf
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

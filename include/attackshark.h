@@ -1,0 +1,264 @@
+/* SPDX-License-Identifier: MIT */
+#ifndef ATTACKSHARK_H
+#define ATTACKSHARK_H
+
+#include <stddef.h>
+#include <stdint.h>
+
+#define AS_MAX_DPI_STAGES 8
+#define AS_MOUSE_CONFIG_LEN 256
+
+/* ---------- HID transport ---------- */
+
+struct as_hid {
+    char path[64];
+    unsigned vid;
+    unsigned pid;
+    int iface;
+    unsigned char descriptor[512];
+    size_t descriptor_len;
+    char product[64];
+    int fd;
+};
+
+/* Discover hidraw nodes whose report descriptor matches the given probe
+ * sequence. Returns the number of matches written to out (max max). */
+int as_hid_find(const unsigned char *probe, size_t probe_len,
+                struct as_hid *out, int max);
+
+int as_hid_open(struct as_hid *dev);
+void as_hid_close(struct as_hid *dev);
+
+/* Feature report helpers. len includes the one-byte report number. */
+int as_feature_set(struct as_hid *dev, const uint8_t *buf, size_t len);
+int as_feature_get(struct as_hid *dev, uint8_t *buf, size_t len, int timeout_ms);
+
+/* Interrupt IN / OUT report helpers, buffer includes report number. */
+int as_hid_write(struct as_hid *dev, const uint8_t *buf, size_t len, int timeout_ms);
+int as_hid_read(struct as_hid *dev, uint8_t *buf, size_t len, int timeout_ms);
+
+/* ---------- Attack Shark R11 Ultra (Compx / Control HUB) ---------- */
+
+struct as_mouse {
+    struct as_hid hid;
+    uint8_t cid;
+    uint8_t mid;
+    uint8_t type;
+    uint8_t type_offset;
+    uint8_t version_major;
+    uint8_t version_minor;
+    uint8_t dongle_version[3];
+};
+
+enum as_mouse_cmd {
+    AS_M_CMD_HANDSHAKE = 1,
+    AS_M_CMD_PC_DRIVER_STATUS = 2,
+    AS_M_CMD_ONLINE = 3,
+    AS_M_CMD_BATTERY = 4,
+    AS_M_CMD_WRITE_FLASH = 7,
+    AS_M_CMD_READ_FLASH = 8,
+    AS_M_CMD_GET_CONFIG = 14,
+    AS_M_CMD_SET_CONFIG = 15,
+    AS_M_CMD_VERSION = 18,
+    AS_M_CMD_DONGLE_VERSION = 29,
+};
+
+/* EEPROM offsets of the per-profile mouse configuration block. */
+enum as_mouse_offset {
+    AS_M_REPORT_RATE = 0,
+    AS_M_MAX_DPI_STAGE = 2,
+    AS_M_CURRENT_DPI = 4,
+    AS_M_KEY_OPERATION = 8,
+    AS_M_LOD = 10,
+    AS_M_DPI_VALUE = 12,
+    AS_M_DPI_COLOR = 44,
+    AS_M_DPI_EFFECT_MODE = 76,
+    AS_M_DPI_EFFECT_BRIGHTNESS = 78,
+    AS_M_DPI_EFFECT_SPEED = 80,
+    AS_M_DPI_EFFECT_STATE = 82,
+    AS_M_KEY_FUNCTION = 96,
+    AS_M_LIGHT = 160,
+    AS_M_DEBOUNCE = 169,
+    AS_M_MOTION_SYNC = 171,
+    AS_M_SLEEP_TIME = 173,
+    AS_M_ANGLE_SNAP = 175,
+    AS_M_RIPPLE = 177,
+    AS_M_PERFORMANCE_STATE = 181,
+    AS_M_PERFORMANCE = 183,
+    AS_M_SENSOR_MODE = 185,
+    AS_M_SENSOR_FPS_20K = 225,
+    AS_M_WHEEL_DEBOUNCE = 227,
+    AS_M_DEBOUNCE_RELEASE = 229,
+    AS_M_SENSOR_3955_DPI = 6912,
+    AS_M_END_EEPROM = 6987,
+};
+
+struct as_mouse_state {
+    int online;
+    int battery;
+    int charging;
+    int battery_voltage;
+    int report_rate;
+    int dpi_stages;
+    int active_dpi_stage;
+    unsigned dpi[AS_MAX_DPI_STAGES][2];
+    int lod;
+    int debounce;
+    int motion_sync;
+    int angle_snap;
+    int ripple;
+    int sleep_time;
+    int sensor_mode;
+    int profile;
+    int version_valid;
+    int version_major;
+    int version_minor;
+    int dongle_version_valid;
+    int dongle_version[3];
+    int config_valid;
+    int light_mode;
+    int light_speed;
+    int light_brightness;
+    int light_on;
+    uint8_t light_color[3];
+    uint8_t light[9];
+    uint8_t raw[AS_MOUSE_CONFIG_LEN];
+};
+
+int as_mouse_open(struct as_mouse *m);
+void as_mouse_close(struct as_mouse *m);
+int as_mouse_handshake(struct as_mouse *m);
+int as_mouse_read_block(struct as_mouse *m, unsigned addr, uint8_t *buf, unsigned len);
+int as_mouse_write_block(struct as_mouse *m, unsigned addr, const uint8_t *buf, unsigned len);
+int as_mouse_read_state(struct as_mouse *m, struct as_mouse_state *st);
+int as_mouse_set_u8(struct as_mouse *m, unsigned offset, uint8_t value);
+int as_mouse_set_dpi_stage(struct as_mouse *m, int stage, unsigned dpi);
+int as_mouse_set_report_rate(struct as_mouse *m, int hz);
+int as_mouse_raw(struct as_mouse *m, uint8_t cmd, unsigned addr,
+                 const uint8_t *payload, unsigned len, uint8_t reply[16]);
+int as_mouse_set_light(struct as_mouse *m, uint8_t mode, uint8_t r, uint8_t g,
+                       uint8_t b, uint8_t speed, uint8_t brightness, int on);
+
+int as_mouse_rate_code(int hz);
+int as_mouse_rate_from_code(int code);
+int as_mouse_dpi_valid(unsigned dpi);
+int as_mouse_encode_dpi(unsigned dpi, uint8_t out[4]);
+unsigned as_mouse_decode_dpi(const uint8_t rec[4]);
+
+/* ---------- Attack Shark R85 HE (Royuan / GearHub) ---------- */
+
+struct as_keyboard {
+    struct as_hid hid;
+    struct as_hid analog;
+    int analog_open;
+    int mag_mult;            /* 10, 100 or 200 (0.1 / 0.01 / 0.005 mm) */
+    uint32_t usb_version;
+    int usb_version_known;
+};
+
+enum as_kb_cmd {
+    /* RY5088 (GearHub "Et") command set used by the R85 HE. */
+    AS_K_RESET = 0x01,
+    AS_K_SET_REPORT_RATE = 0x03,
+    AS_K_SET_PROFILE = 0x04,
+    AS_K_SET_DEBOUNCE = 0x06,
+    AS_K_SET_LED = 0x07,
+    AS_K_SET_KBOPTION = 0x09,
+    AS_K_SET_KEYMATRIX = 0x0A,
+    AS_K_SET_FNKEYMATRIX = 0x10,
+    AS_K_SET_SLEEPTIME = 0x11,
+    AS_K_SET_MAGNETISM_STREAM = 0x1B,
+    AS_K_SET_MAGNETISM_MODE = 0x1D,
+    AS_K_SET_MULTI_MAGNETISM = 0x65,
+    AS_K_GET_RF_VERSION = 0x80,
+    AS_K_GET_REPORT_RATE = 0x83,
+    AS_K_GET_PROFILE = 0x84,
+    AS_K_GET_DEBOUNCE = 0x86,
+    AS_K_GET_LED = 0x87,
+    AS_K_GET_KEYMATRIX = 0x8A,
+    AS_K_GET_USB_VERSION = 0x8F,
+    AS_K_GET_MAGNETISM_MODE = 0x9D,
+    AS_K_GET_MULTI_MAGNETISM = 0xE5,
+    AS_K_GET_REV = 0xF0,
+};
+
+enum as_kb_mag_param {
+    AS_K_MAG_ACTUATION = 0,
+    AS_K_MAG_RELEASE = 1,
+    AS_K_MAG_RT_PRESS = 2,
+    AS_K_MAG_RT_RELEASE = 3,
+    AS_K_MAG_DKS_TOP = 4,
+    AS_K_MAG_MT_TIME = 5,
+    AS_K_MAG_DEADZONE = 6,
+    AS_K_MAG_OPTION = 7,
+    AS_K_MAG_DKS_FLAGS = 8,
+    AS_K_MAG_SOCD_PAIR = 9,
+};
+
+#define AS_K_REPORT_LEN 64
+#define AS_K_MAG_READ_PAGE 64
+#define AS_K_MAG_WRITE_PAGE 56
+
+struct as_kb_light {
+    int valid;
+    uint8_t mode;
+    int speed;
+    int brightness;
+    int option;
+    int dazzle;
+    uint8_t r, g, b;
+};
+
+struct as_kb_state {
+    int usb_version_valid;
+    uint32_t usb_version;
+    int revision_valid;
+    int revision;
+    int profile;
+    int report_rate;
+    int debounce;
+    struct as_kb_light light;
+    int mag_mode;
+};
+
+int as_keyboard_open(struct as_keyboard *kb);
+void as_keyboard_close(struct as_keyboard *kb);
+
+/* Send a command and return the 64-byte answer in out (may be NULL). */
+int as_keyboard_cmd(struct as_keyboard *kb, uint8_t cmd, const uint8_t *args,
+                    size_t args_len, int bit8, uint8_t *out, int timeout_ms);
+/* Same, but accepts a response that does not echo the command byte. */
+int as_keyboard_cmd_raw(struct as_keyboard *kb, uint8_t cmd, const uint8_t *args,
+                        size_t args_len, int bit8, uint8_t *out,
+                        int timeout_ms);
+
+int as_keyboard_read_state(struct as_keyboard *kb, struct as_kb_state *st);
+int as_keyboard_open_analog(struct as_keyboard *kb);
+int as_keyboard_enable_stream(struct as_keyboard *kb, int on);
+int as_keyboard_set_light(struct as_keyboard *kb, const struct as_kb_light *l);
+int as_keyboard_set_report_rate(struct as_keyboard *kb, int hz);
+int as_keyboard_set_profile(struct as_keyboard *kb, int profile);
+int as_keyboard_set_debounce(struct as_keyboard *kb, int ms);
+int as_keyboard_set_mag_mode(struct as_keyboard *kb, int mode);
+/* Hall-effect parameters: width (u8/u16) is chosen from the firmware
+ * version, exactly like the vendor driver. */
+int as_keyboard_precision(struct as_keyboard *kb);
+int as_keyboard_get_param(struct as_keyboard *kb, int param, int32_t *values,
+                          size_t count);
+int as_keyboard_set_param(struct as_keyboard *kb, int param,
+                          const int32_t *values, size_t count, int save);
+double as_kb_value_to_mm(struct as_keyboard *kb, int param, int32_t raw);
+int as_keyboard_set_travel(struct as_keyboard *kb, int rapid_trigger,
+                           double actuation, double release, double rt_press,
+                           double rt_release, double deadzone);
+
+int as_kb_rate_code(int hz);
+int as_kb_rate_from_code(int code);
+uint8_t as_kb_mm_to_raw(double mm);
+double as_kb_raw_to_mm(uint8_t raw);
+uint8_t as_kb_deadzone_to_raw(double mm);
+
+/* ---------- misc ---------- */
+const char *as_strerror(int err);
+
+#endif
