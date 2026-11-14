@@ -79,10 +79,9 @@ static void on_changed(AsStore *self, gpointer data)
                    dev->dpi_stages);
         } else {
             printf("keyboard %s  %04x:%04x  fw %u  rate %d  profile %d  "
-                   "light %s%s\n",
+                   "side light %s\n",
                    dev->path, dev->vid, dev->pid, dev->usb_version, dev->rate,
-                   dev->profile, dev->light_on > 0 ? "on" : "off",
-                   dev->side_light_valid ? " + side light" : "");
+                   dev->profile, dev->side_light_valid ? "yes" : "no");
         }
         if (dev->error[0]) {
             printf("         note: %s\n", dev->error);

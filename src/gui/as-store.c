@@ -147,7 +147,6 @@ static void handles_prune(GHashTable *handles, GHashTable *present)
 static void fill_identity(AsDevice *dev, const struct as_hid *hid, int kind)
 {
     dev->kind = (AsDeviceKind)kind;
-    dev->light_on = 1;   /* assumed on until the user flips the switch */
     g_strlcpy(dev->path, hid->path, sizeof(dev->path));
     dev->vid = hid->vid;
     dev->pid = hid->pid;
@@ -198,7 +197,6 @@ static void fill_mouse(Handle *h, AsDevice *dev)
     dev->light_mode = st.light_mode;
     dev->light_brightness = st.light_brightness;
     dev->light_speed = st.light_speed;
-    dev->light_on = st.light_on;
     memcpy(dev->rgb, st.light_color, sizeof(dev->rgb));
     if (!st.config_valid && !st.online) {
         /* Not an error: the mouse is asleep or switched off. */
@@ -229,6 +227,9 @@ static void fill_keyboard(Handle *h, AsDevice *dev)
     dev->mag_mode = st.mag_mode;
     if (st.side_light.valid) {
         dev->side_light_valid = 1;
+        if (st.side_light.mode != 0) {
+            dev->side_light_mode_saved = st.side_light.mode;
+        }
         dev->side_light_mode = st.side_light.mode;
         dev->side_light_speed = st.side_light.speed;
         dev->side_light_brightness = st.side_light.brightness;
@@ -236,10 +237,6 @@ static void fill_keyboard(Handle *h, AsDevice *dev)
         dev->side_rgb[0] = st.side_light.r;
         dev->side_rgb[1] = st.side_light.g;
         dev->side_rgb[2] = st.side_light.b;
-    }
-    if (st.light_on >= 0) {
-        dev->light_on = st.light_on;
-        dev->light_on_known = 1;
     }
     if (st.light.valid) {
         dev->light_mode = st.light.mode;
@@ -343,16 +340,7 @@ static void store_merge(AsStore *self, GPtrArray *fresh)
         AsDevice *old = as_store_lookup(self, dev->path);
 
         if (old) {
-            int light_on = old->light_on;
-            int light_on_known = old->light_on_known;
-
             *old = *dev;
-            /* The backlight switch is not readable on every firmware, so the
-             * value the user set must survive a refresh. */
-            if (!dev->light_on_known) {
-                old->light_on = light_on;
-                old->light_on_known = light_on_known;
-            }
             g_free(dev);
             dev = old;
         }
@@ -463,8 +451,6 @@ static int apply_keyboard(struct as_keyboard *kb, const AsOpRequest *req)
         return as_keyboard_set_debounce(kb, req->value);
     case AS_OP_KB_MAG_MODE:
         return as_keyboard_set_mag_mode(kb, req->value);
-    case AS_OP_KB_LIGHT_POWER:
-        return as_keyboard_set_light_power(kb, req->value ? 1 : 0);
     case AS_OP_KB_SIDE_LIGHT:
         memset(&light, 0, sizeof(light));
         light.valid = 1;
@@ -558,24 +544,25 @@ static void apply_optimistic(AsDevice *dev, const AsOpRequest *req)
         dev->light_speed = req->light_speed;
         dev->light_brightness = req->light_brightness;
         memcpy(dev->rgb, req->rgb, sizeof(dev->rgb));
-        if (req->op == AS_OP_MOUSE_LIGHT) {
-            dev->light_on = req->light_on;
-        } else {
+        if (req->op == AS_OP_KB_LIGHT) {
             dev->light_opt = req->light_option;
             dev->light_dazzle = req->light_dazzle;
         }
         break;
     case AS_OP_KB_SIDE_LIGHT:
+        if (req->light_mode == 0) {
+            if (dev->side_light_mode != 0) {
+                dev->side_light_mode_saved = dev->side_light_mode;
+            }
+        } else {
+            dev->side_light_mode_saved = req->light_mode;
+        }
         dev->side_light_mode = req->light_mode;
         dev->side_light_speed = req->light_speed;
         dev->side_light_brightness = req->light_brightness;
         dev->side_light_dazzle = req->light_dazzle;
         memcpy(dev->side_rgb, req->rgb, sizeof(dev->side_rgb));
         dev->side_light_valid = 1;
-        break;
-    case AS_OP_KB_LIGHT_POWER:
-        dev->light_on = req->value ? 1 : 0;
-        dev->light_on_known = 1;
         break;
     case AS_OP_KB_PROFILE:
         dev->profile = req->value;

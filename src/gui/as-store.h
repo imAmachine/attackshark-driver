@@ -56,7 +56,6 @@ typedef struct {
     int light_mode;
     int light_brightness;
     int light_speed;
-    int light_on;
     uint8_t rgb[3];
 
     /* keyboard */
@@ -72,8 +71,8 @@ typedef struct {
     int side_light_speed;
     int side_light_brightness;
     int side_light_dazzle;
+    int side_light_mode_saved;   /* last non-zero mode, restored by the switch */
     uint8_t side_rgb[3];
-    int light_on_known;   /* the hardware does not always report the switch */
 } AsDevice;
 
 /* Settings the GUI can write. Everything is a single call into the driver. */
@@ -92,7 +91,6 @@ enum {
     AS_OP_KB_DEBOUNCE,
     AS_OP_KB_MAG_MODE,
     AS_OP_KB_LIGHT,
-    AS_OP_KB_LIGHT_POWER,
     AS_OP_KB_SIDE_LIGHT,
 };
 
