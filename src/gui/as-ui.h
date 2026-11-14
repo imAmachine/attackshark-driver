@@ -14,7 +14,12 @@ GtkStringList *as_ui_rate_list(void);
 int as_ui_rate_to_index(int hz);
 int as_ui_rate_from_index(guint index);
 
-GtkStringList *as_ui_light_list(void);
+/* Light modes offered by the UI. "off" is left out on purpose: the firmware
+ * ignores it, the backlight is switched by the master switch instead. `side`
+ * selects the smaller list of the edge lighting, `modes` receives the wire
+ * values so the combo index can be translated back. */
+GtkStringList *as_ui_light_list_for(int side, int *modes, int max);
+int as_ui_light_index(const int *modes, int count, int mode);
 
 const char *as_ui_mag_mode_name(int mode);
 int as_ui_mag_mode_count(void);

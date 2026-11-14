@@ -35,16 +35,39 @@ int as_ui_rate_from_index(guint index)
     return -1;
 }
 
-GtkStringList *as_ui_light_list(void)
+GtkStringList *as_ui_light_list_for(int side, int *modes, int max)
 {
+    static const int side_modes[] = { 1, 2, 3, 4, 5, 20, 21, 22 };
     GtkStringList *list = gtk_string_list_new(NULL);
+    int n = 0;
 
-    for (int i = 0; i < as_light_mode_count(); i++) {
+    if (side) {
+        for (size_t i = 0; i < G_N_ELEMENTS(side_modes) && n < max; i++) {
+            modes[n++] = side_modes[i];
+        }
+    } else {
+        for (int m = 1; m < as_light_mode_count() && n < max; m++) {
+            modes[n++] = m;
+        }
+    }
+    for (int i = 0; i < n; i++) {
         char buf[64];
-        snprintf(buf, sizeof(buf), "%d · %s", i, as_light_mode_name(i));
+
+        snprintf(buf, sizeof(buf), "%d · %s", modes[i],
+                 as_light_mode_name(modes[i]));
         gtk_string_list_append(list, buf);
     }
     return list;
+}
+
+int as_ui_light_index(const int *modes, int count, int mode)
+{
+    for (int i = 0; i < count; i++) {
+        if (modes[i] == mode) {
+            return i;
+        }
+    }
+    return -1;
 }
 
 const char *as_ui_mag_mode_name(int mode)
@@ -127,9 +150,8 @@ AdwSwitchRow *as_ui_switch_row(const char *title, const char *subtitle)
 void as_ui_combo_set(AdwComboRow *row, gboolean *guard, int index)
 {
     *guard = TRUE;
-    if (index >= 0) {
-        adw_combo_row_set_selected(row, (guint)index);
-    }
+    adw_combo_row_set_selected(row, index >= 0 ? (guint)index
+                                               : GTK_INVALID_LIST_POSITION);
     *guard = FALSE;
 }
 

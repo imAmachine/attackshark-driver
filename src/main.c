@@ -535,6 +535,14 @@ static void print_kb_light(const struct as_kb_state *st)
     printf("dazzle      %s\n", l->dazzle ? "on" : "off");
 }
 
+static void print_kb_side_light(const struct as_kb_light *l)
+{
+    printf("side mode   %d (%s)\n", l->mode, as_light_mode_name(l->mode));
+    printf("side bright %d\n", l->brightness);
+    printf("side speed  %d\n", l->speed);
+    printf("side color  %02x%02x%02x\n", l->r, l->g, l->b);
+}
+
 static volatile sig_atomic_t stop_stream;
 
 static void on_sigint(int sig)
@@ -639,6 +647,14 @@ static int cmd_keyboard(int argc, char **argv)
                        st.light.speed, st.light.r, st.light.g, st.light.b,
                        st.light.dazzle);
             }
+            if (st.side_light.valid) {
+                printf("},\"side_light\":{\"mode\":%d,\"brightness\":%d,"
+                       "\"speed\":%d,\"color\":\"%02x%02x%02x\","
+                       "\"dazzle\":%d",
+                       st.side_light.mode, st.side_light.brightness,
+                       st.side_light.speed, st.side_light.r, st.side_light.g,
+                       st.side_light.b, st.side_light.dazzle);
+            }
             printf("}}\n");
         } else {
             printf("device         R85 HE\n");
@@ -667,6 +683,15 @@ static int cmd_keyboard(int argc, char **argv)
                 printf("  speed        %d\n", st.light.speed);
                 printf("  color        %02x%02x%02x\n", st.light.r, st.light.g,
                        st.light.b);
+                if (st.side_light.valid) {
+                    printf("side light\n");
+                    printf("  mode         %d (%s)\n", st.side_light.mode,
+                           as_light_mode_name(st.side_light.mode));
+                    printf("  brightness   %d\n", st.side_light.brightness);
+                    printf("  speed        %d\n", st.side_light.speed);
+                    printf("  color        %02x%02x%02x\n", st.side_light.r,
+                           st.side_light.g, st.side_light.b);
+                }
             }
         }
     } else if (!strcmp(sub, "light")) {
@@ -741,6 +766,65 @@ static int cmd_keyboard(int argc, char **argv)
                 fprintf(stderr, "attackshark: %s\n", as_strerror(ret));
             } else if (!json_mode) {
                 printf("light updated\n");
+            }
+        }
+    } else if (!strcmp(sub, "side-light")) {
+        const char *mode = opt_value(argc, argv, "--mode");
+        const char *color = opt_value(argc, argv, "--color");
+        const char *brightness = opt_value(argc, argv, "--brightness");
+        const char *speed = opt_value(argc, argv, "--speed");
+
+        ret = as_keyboard_read_state(&kb, &st);
+        if (ret < 0 || !st.side_light.valid) {
+            fprintf(stderr, "attackshark: side light is not available\n");
+            as_keyboard_close(&kb);
+            return 1;
+        }
+        if (!mode && !color && !brightness && !speed) {
+            if (json_mode) {
+                printf("{\"mode\":%d,\"name\":\"%s\",\"brightness\":%d,"
+                       "\"speed\":%d,\"color\":\"%02x%02x%02x\","
+                       "\"dazzle\":%d}\n",
+                       st.side_light.mode,
+                       as_light_mode_name(st.side_light.mode),
+                       st.side_light.brightness, st.side_light.speed,
+                       st.side_light.r, st.side_light.g, st.side_light.b,
+                       st.side_light.dazzle);
+            } else {
+                print_kb_side_light(&st.side_light);
+            }
+        } else {
+            struct as_kb_light l = st.side_light;
+
+            if (mode) {
+                int m = as_light_mode_by_name(mode);
+                if (m < 0) {
+                    fprintf(stderr, "attackshark: unknown light mode '%s'\n",
+                            mode);
+                    as_keyboard_close(&kb);
+                    return 2;
+                }
+                l.mode = (uint8_t)m;
+            }
+            if (color && parse_color(color, &l.r, &l.g, &l.b) < 0) {
+                fprintf(stderr, "attackshark: color must be RRGGBB\n");
+                as_keyboard_close(&kb);
+                return 2;
+            }
+            if (brightness) {
+                l.brightness = atoi(brightness);
+            }
+            if (speed) {
+                l.speed = atoi(speed);
+            }
+            if (opt_flag(argc, argv, "--no-dazzle")) {
+                l.dazzle = 0;
+            }
+            ret = as_keyboard_set_sidelight(&kb, &l);
+            if (ret < 0) {
+                fprintf(stderr, "attackshark: %s\n", as_strerror(ret));
+            } else if (!json_mode) {
+                printf("side light updated\n");
             }
         }
     } else if (!strcmp(sub, "rate")) {
@@ -1000,6 +1084,8 @@ static void usage(void)
         "  keyboard info               firmware, profile, light, rate\n"
         "  keyboard light [--mode M] [--brightness 0-4] [--speed 0-4]\n"
         "                [--color RRGGBB] [--option N] [--no-dazzle] [on|off]\n"
+        "  keyboard side-light [--mode M] [--brightness 0-4] [--speed 0-4]\n"
+        "                      [--color RRGGBB] [--no-dazzle]\n"
         "  keyboard rate HZ            polling rate (125..8000)\n"
         "  keyboard profile N          active profile\n"
         "  keyboard debounce MS        debounce time\n"

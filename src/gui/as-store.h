@@ -67,6 +67,12 @@ typedef struct {
     int mag_mode;
     int light_opt;
     int light_dazzle;
+    int side_light_valid;
+    int side_light_mode;
+    int side_light_speed;
+    int side_light_brightness;
+    int side_light_dazzle;
+    uint8_t side_rgb[3];
     int light_on_known;   /* the hardware does not always report the switch */
 } AsDevice;
 
@@ -87,6 +93,7 @@ enum {
     AS_OP_KB_MAG_MODE,
     AS_OP_KB_LIGHT,
     AS_OP_KB_LIGHT_POWER,
+    AS_OP_KB_SIDE_LIGHT,
 };
 
 typedef struct {

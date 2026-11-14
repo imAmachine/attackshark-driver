@@ -227,6 +227,16 @@ static void fill_keyboard(Handle *h, AsDevice *dev)
     dev->rate = st.report_rate;
     dev->debounce = st.debounce;
     dev->mag_mode = st.mag_mode;
+    if (st.side_light.valid) {
+        dev->side_light_valid = 1;
+        dev->side_light_mode = st.side_light.mode;
+        dev->side_light_speed = st.side_light.speed;
+        dev->side_light_brightness = st.side_light.brightness;
+        dev->side_light_dazzle = st.side_light.dazzle;
+        dev->side_rgb[0] = st.side_light.r;
+        dev->side_rgb[1] = st.side_light.g;
+        dev->side_rgb[2] = st.side_light.b;
+    }
     if (st.light_on >= 0) {
         dev->light_on = st.light_on;
         dev->light_on_known = 1;
@@ -455,6 +465,18 @@ static int apply_keyboard(struct as_keyboard *kb, const AsOpRequest *req)
         return as_keyboard_set_mag_mode(kb, req->value);
     case AS_OP_KB_LIGHT_POWER:
         return as_keyboard_set_light_power(kb, req->value ? 1 : 0);
+    case AS_OP_KB_SIDE_LIGHT:
+        memset(&light, 0, sizeof(light));
+        light.valid = 1;
+        light.mode = (uint8_t)req->light_mode;
+        light.speed = req->light_speed;
+        light.brightness = req->light_brightness;
+        light.option = req->light_option;
+        light.dazzle = req->light_dazzle;
+        light.r = req->rgb[0];
+        light.g = req->rgb[1];
+        light.b = req->rgb[2];
+        return as_keyboard_set_sidelight(kb, &light);
     case AS_OP_KB_LIGHT:
         memset(&light, 0, sizeof(light));
         light.valid = 1;
@@ -542,6 +564,14 @@ static void apply_optimistic(AsDevice *dev, const AsOpRequest *req)
             dev->light_opt = req->light_option;
             dev->light_dazzle = req->light_dazzle;
         }
+        break;
+    case AS_OP_KB_SIDE_LIGHT:
+        dev->side_light_mode = req->light_mode;
+        dev->side_light_speed = req->light_speed;
+        dev->side_light_brightness = req->light_brightness;
+        dev->side_light_dazzle = req->light_dazzle;
+        memcpy(dev->side_rgb, req->rgb, sizeof(dev->side_rgb));
+        dev->side_light_valid = 1;
         break;
     case AS_OP_KB_LIGHT_POWER:
         dev->light_on = req->value ? 1 : 0;

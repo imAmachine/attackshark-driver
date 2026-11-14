@@ -78,9 +78,11 @@ static void on_changed(AsStore *self, gpointer data)
                    dev->online ? "online" : "offline", dev->battery, dev->rate,
                    dev->dpi_stages);
         } else {
-            printf("keyboard %s  %04x:%04x  fw %u  rate %d  profile %d\n",
+            printf("keyboard %s  %04x:%04x  fw %u  rate %d  profile %d  "
+                   "light %s%s\n",
                    dev->path, dev->vid, dev->pid, dev->usb_version, dev->rate,
-                   dev->profile);
+                   dev->profile, dev->light_on > 0 ? "on" : "off",
+                   dev->side_light_valid ? " + side light" : "");
         }
         if (dev->error[0]) {
             printf("         note: %s\n", dev->error);

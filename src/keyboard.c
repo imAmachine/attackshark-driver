@@ -415,6 +415,45 @@ int as_keyboard_set_light_power(struct as_keyboard *kb, int on)
                            0);
 }
 
+int as_keyboard_get_sidelight(struct as_keyboard *kb, struct as_kb_light *l)
+{
+    uint8_t out[REPORT_LEN];
+    int ret;
+
+    ret = as_keyboard_cmd(kb, AS_K_GET_SIDELED, NULL, 0, 0, out,
+                          HS_TIMEOUT_MS);
+    if (ret < 0) {
+        return ret;
+    }
+    memset(l, 0, sizeof(*l));
+    l->valid = 1;
+    l->mode = out[1];
+    l->speed = out[2];
+    l->brightness = out[3];
+    l->option = out[4] >> 4;
+    l->dazzle = (out[4] & 0x0f) == 8;
+    l->r = out[5];
+    l->g = out[6];
+    l->b = out[7];
+    return 0;
+}
+
+int as_keyboard_set_sidelight(struct as_keyboard *kb,
+                              const struct as_kb_light *l)
+{
+    uint8_t args[7];
+
+    args[0] = l->mode;
+    args[1] = (uint8_t)(l->speed < 0 ? 0 : (l->speed > 4 ? 4 : l->speed));
+    args[2] = (uint8_t)(l->brightness < 0 ? 0 :
+                        (l->brightness > 4 ? 4 : l->brightness));
+    args[3] = (uint8_t)(((l->option & 0x0f) << 4) | (l->dazzle ? 8 : 7));
+    args[4] = l->r;
+    args[5] = l->g;
+    args[6] = l->b;
+    return as_keyboard_cmd(kb, AS_K_SET_SIDELED, args, sizeof(args), 1, NULL, 0);
+}
+
 int as_keyboard_set_report_rate(struct as_keyboard *kb, int hz)
 {
     uint8_t args[2];
@@ -585,6 +624,12 @@ int as_keyboard_read_state(struct as_keyboard *kb, struct as_kb_state *st)
             l->r = out[5];
             l->g = out[6];
             l->b = out[7];
+        }
+    }
+
+    if (!dead) {
+        if (as_keyboard_get_sidelight(kb, &st->side_light) < 0) {
+            st->side_light.valid = 0;
         }
     }
 
