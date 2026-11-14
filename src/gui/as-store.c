@@ -147,6 +147,7 @@ static void handles_prune(GHashTable *handles, GHashTable *present)
 static void fill_identity(AsDevice *dev, const struct as_hid *hid, int kind)
 {
     dev->kind = (AsDeviceKind)kind;
+    dev->light_on = 1;   /* assumed on until the user flips the switch */
     g_strlcpy(dev->path, hid->path, sizeof(dev->path));
     dev->vid = hid->vid;
     dev->pid = hid->pid;
@@ -226,6 +227,10 @@ static void fill_keyboard(Handle *h, AsDevice *dev)
     dev->rate = st.report_rate;
     dev->debounce = st.debounce;
     dev->mag_mode = st.mag_mode;
+    if (st.light_on >= 0) {
+        dev->light_on = st.light_on;
+        dev->light_on_known = 1;
+    }
     if (st.light.valid) {
         dev->light_mode = st.light.mode;
         dev->light_speed = st.light.speed;
@@ -328,7 +333,16 @@ static void store_merge(AsStore *self, GPtrArray *fresh)
         AsDevice *old = as_store_lookup(self, dev->path);
 
         if (old) {
+            int light_on = old->light_on;
+            int light_on_known = old->light_on_known;
+
             *old = *dev;
+            /* The backlight switch is not readable on every firmware, so the
+             * value the user set must survive a refresh. */
+            if (!dev->light_on_known) {
+                old->light_on = light_on;
+                old->light_on_known = light_on_known;
+            }
             g_free(dev);
             dev = old;
         }
@@ -439,6 +453,8 @@ static int apply_keyboard(struct as_keyboard *kb, const AsOpRequest *req)
         return as_keyboard_set_debounce(kb, req->value);
     case AS_OP_KB_MAG_MODE:
         return as_keyboard_set_mag_mode(kb, req->value);
+    case AS_OP_KB_LIGHT_POWER:
+        return as_keyboard_set_light_power(kb, req->value ? 1 : 0);
     case AS_OP_KB_LIGHT:
         memset(&light, 0, sizeof(light));
         light.valid = 1;
@@ -526,6 +542,10 @@ static void apply_optimistic(AsDevice *dev, const AsOpRequest *req)
             dev->light_opt = req->light_option;
             dev->light_dazzle = req->light_dazzle;
         }
+        break;
+    case AS_OP_KB_LIGHT_POWER:
+        dev->light_on = req->value ? 1 : 0;
+        dev->light_on_known = 1;
         break;
     case AS_OP_KB_PROFILE:
         dev->profile = req->value;

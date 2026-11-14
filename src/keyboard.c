@@ -388,6 +388,33 @@ int as_keyboard_set_light(struct as_keyboard *kb, const struct as_kb_light *l)
     return as_keyboard_cmd(kb, AS_K_SET_LED, args, 7, 1, NULL, 0);
 }
 
+int as_keyboard_get_light_power(struct as_keyboard *kb)
+{
+    uint8_t out[REPORT_LEN];
+    int ret;
+
+    ret = as_keyboard_cmd(kb, AS_K_GET_LED_POWER, NULL, 0, 0, out,
+                          HS_TIMEOUT_MS);
+    if (ret < 0) {
+        return ret;
+    }
+    /* Both layouts the vendor software handles put the flag in byte 1 or 3;
+     * 1 means the backlight is in low-power (off) mode. Some firmwares just
+     * echo the request, so "all zeroes" is "unknown", not "on". */
+    if (out[1] == 1 || out[3] == 1) {
+        return 0;
+    }
+    return -1;
+}
+
+int as_keyboard_set_light_power(struct as_keyboard *kb, int on)
+{
+    uint8_t args[3] = { 0, 0, on ? 0 : 1 };
+
+    return as_keyboard_cmd(kb, AS_K_SET_LED_POWER, args, sizeof(args), 0, NULL,
+                           0);
+}
+
 int as_keyboard_set_report_rate(struct as_keyboard *kb, int hz)
 {
     uint8_t args[2];
@@ -482,6 +509,7 @@ int as_keyboard_read_state(struct as_keyboard *kb, struct as_kb_state *st)
     int dead = 0;
 
     memset(st, 0, sizeof(*st));
+    st->light_on = -1;
     st->report_rate = -1;
     st->profile = -1;
     st->debounce = -1;
@@ -557,6 +585,14 @@ int as_keyboard_read_state(struct as_keyboard *kb, struct as_kb_state *st)
             l->r = out[5];
             l->g = out[6];
             l->b = out[7];
+        }
+    }
+
+    if (!dead) {
+        int power = as_keyboard_get_light_power(kb);
+
+        if (power >= 0) {
+            st->light_on = power;
         }
     }
 

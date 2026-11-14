@@ -163,6 +163,7 @@ enum as_kb_cmd {
     AS_K_SET_PROFILE = 0x04,
     AS_K_SET_DEBOUNCE = 0x06,
     AS_K_SET_LED = 0x07,
+    AS_K_SET_LED_POWER = 0x05,
     AS_K_SET_KBOPTION = 0x09,
     AS_K_SET_KEYMATRIX = 0x0A,
     AS_K_SET_FNKEYMATRIX = 0x10,
@@ -175,6 +176,7 @@ enum as_kb_cmd {
     AS_K_GET_PROFILE = 0x84,
     AS_K_GET_DEBOUNCE = 0x86,
     AS_K_GET_LED = 0x87,
+    AS_K_GET_LED_POWER = 0x85,
     AS_K_GET_KEYMATRIX = 0x8A,
     AS_K_GET_USB_VERSION = 0x8F,
     AS_K_GET_MAGNETISM_MODE = 0x9D,
@@ -210,6 +212,7 @@ struct as_kb_light {
 };
 
 struct as_kb_state {
+    int light_on;            /* 1/0, -1 when the firmware does not answer */
     int usb_version_valid;
     uint32_t usb_version;
     int revision_valid;
@@ -236,6 +239,10 @@ int as_keyboard_read_state(struct as_keyboard *kb, struct as_kb_state *st);
 int as_keyboard_open_analog(struct as_keyboard *kb);
 int as_keyboard_enable_stream(struct as_keyboard *kb, int on);
 int as_keyboard_set_light(struct as_keyboard *kb, const struct as_kb_light *l);
+/* Master switch for the whole backlight ("low power mode" in the vendor
+ * software): mode 0 only changes the effect, not the power state. */
+int as_keyboard_get_light_power(struct as_keyboard *kb);
+int as_keyboard_set_light_power(struct as_keyboard *kb, int on);
 int as_keyboard_set_report_rate(struct as_keyboard *kb, int hz);
 int as_keyboard_set_profile(struct as_keyboard *kb, int profile);
 int as_keyboard_set_debounce(struct as_keyboard *kb, int ms);

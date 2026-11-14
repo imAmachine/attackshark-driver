@@ -521,8 +521,12 @@ static int cmd_mouse(int argc, char **argv)
 
 /* ---------------------------- keyboard ---------------------------- */
 
-static void print_kb_light(const struct as_kb_light *l)
+static void print_kb_light(const struct as_kb_state *st)
 {
+    const struct as_kb_light *l = &st->light;
+
+    printf("state       %s\n", st->light_on == 0 ? "off" :
+                               st->light_on > 0 ? "on" : "unknown");
     printf("mode        %d (%s)\n", l->mode, as_light_mode_name(l->mode));
     printf("brightness  %d\n", l->brightness);
     printf("speed       %d\n", l->speed);
@@ -629,10 +633,11 @@ static int cmd_keyboard(int argc, char **argv)
                    st.revision, st.profile, st.report_rate, st.debounce,
                    st.mag_mode);
             if (st.light.valid) {
-                printf("\"mode\":%d,\"brightness\":%d,\"speed\":%d,"
+                printf("\"on\":%d,\"mode\":%d,\"brightness\":%d,\"speed\":%d,"
                        "\"color\":\"%02x%02x%02x\",\"dazzle\":%d",
-                       st.light.mode, st.light.brightness, st.light.speed,
-                       st.light.r, st.light.g, st.light.b, st.light.dazzle);
+                       st.light_on, st.light.mode, st.light.brightness,
+                       st.light.speed, st.light.r, st.light.g, st.light.b,
+                       st.light.dazzle);
             }
             printf("}}\n");
         } else {
@@ -653,6 +658,9 @@ static int cmd_keyboard(int argc, char **argv)
             }
             if (st.light.valid) {
                 printf("light\n");
+                printf("  state        %s\n", st.light_on == 0 ? "off" :
+                                              st.light_on > 0 ? "on" :
+                                                               "unknown");
                 printf("  mode         %d (%s)\n", st.light.mode,
                        as_light_mode_name(st.light.mode));
                 printf("  brightness   %d\n", st.light.brightness);
@@ -667,20 +675,30 @@ static int cmd_keyboard(int argc, char **argv)
         const char *brightness = opt_value(argc, argv, "--brightness");
         const char *speed = opt_value(argc, argv, "--speed");
         const char *option = opt_value(argc, argv, "--option");
+        int have_power = 0, power_on = 0;
 
-        if (!mode && !color && !brightness && !speed && !option) {
+        for (int i = 1; i < argc; i++) {
+            if (!strcmp(argv[i], "on") || !strcmp(argv[i], "off")) {
+                have_power = 1;
+                power_on = argv[i][1] == 'n';
+            }
+        }
+
+        if (!mode && !color && !brightness && !speed && !option && !have_power) {
             ret = as_keyboard_read_state(&kb, &st);
             if (ret == 0 && st.light.valid) {
                 if (json_mode) {
-                    printf("{\"mode\":%d,\"name\":\"%s\",\"brightness\":%d,"
-                           "\"speed\":%d,\"color\":\"%02x%02x%02x\","
-                           "\"option\":%d,\"dazzle\":%d}\n",
-                           st.light.mode, as_light_mode_name(st.light.mode),
+                    printf("{\"on\":%d,\"mode\":%d,\"name\":\"%s\","
+                           "\"brightness\":%d,\"speed\":%d,"
+                           "\"color\":\"%02x%02x%02x\",\"option\":%d,"
+                           "\"dazzle\":%d}\n",
+                           st.light_on, st.light.mode,
+                           as_light_mode_name(st.light.mode),
                            st.light.brightness, st.light.speed, st.light.r,
                            st.light.g, st.light.b, st.light.option,
                            st.light.dazzle);
                 } else {
-                    print_kb_light(&st.light);
+                    print_kb_light(&st);
                 }
             } else {
                 fprintf(stderr, "attackshark: %s\n", as_strerror(ret));
@@ -716,6 +734,9 @@ static int cmd_keyboard(int argc, char **argv)
                 l.dazzle = 0;
             }
             ret = as_keyboard_set_light(&kb, &l);
+            if (ret == 0 && have_power) {
+                ret = as_keyboard_set_light_power(&kb, power_on);
+            }
             if (ret < 0) {
                 fprintf(stderr, "attackshark: %s\n", as_strerror(ret));
             } else if (!json_mode) {
@@ -978,7 +999,7 @@ static void usage(void)
         "\n"
         "  keyboard info               firmware, profile, light, rate\n"
         "  keyboard light [--mode M] [--brightness 0-4] [--speed 0-4]\n"
-        "                [--color RRGGBB] [--option N] [--no-dazzle]\n"
+        "                [--color RRGGBB] [--option N] [--no-dazzle] [on|off]\n"
         "  keyboard rate HZ            polling rate (125..8000)\n"
         "  keyboard profile N          active profile\n"
         "  keyboard debounce MS        debounce time\n"

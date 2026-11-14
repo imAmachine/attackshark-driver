@@ -67,6 +67,7 @@ typedef struct {
     int mag_mode;
     int light_opt;
     int light_dazzle;
+    int light_on_known;   /* the hardware does not always report the switch */
 } AsDevice;
 
 /* Settings the GUI can write. Everything is a single call into the driver. */
@@ -85,6 +86,7 @@ enum {
     AS_OP_KB_DEBOUNCE,
     AS_OP_KB_MAG_MODE,
     AS_OP_KB_LIGHT,
+    AS_OP_KB_LIGHT_POWER,
 };
 
 typedef struct {

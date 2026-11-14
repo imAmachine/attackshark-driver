@@ -22,6 +22,7 @@ typedef struct {
     AdwPreferencesGroup *settings_group;
 
     /* light */
+    AdwSwitchRow *sw_light;
     AdwComboRow *row_light_mode;
     AdwSpinRow *row_bright;
     AdwSpinRow *row_speed;
@@ -126,6 +127,22 @@ static void apply_mag_mode(AdwComboRow *row, GParamSpec *pspec, gpointer user_da
     as_store_apply(p->store, p->path, &req);
 }
 
+static void apply_light_power(AdwSwitchRow *row, GParamSpec *pspec,
+                              gpointer user_data)
+{
+    AsKeyboardPage *p = user_data;
+    AsOpRequest req = { 0 };
+
+    (void)pspec;
+    if (p->updating) {
+        return;
+    }
+    req.op = AS_OP_KB_LIGHT_POWER;
+    req.value = adw_switch_row_get_active(row) ? 1 : 0;
+    /* The master switch is not debounced: one switch, one write. */
+    as_store_apply(p->store, p->path, &req);
+}
+
 static void apply_light(AsKeyboardPage *p)
 {
     AsDevice *dev;
@@ -223,6 +240,7 @@ static void update_page(AsKeyboardPage *p)
 
     as_ui_combo_set(p->row_rate_combo, &p->updating,
                     as_ui_rate_to_index(dev->rate));
+    as_ui_switch_set(p->sw_light, &p->updating, dev->light_on > 0);
     as_ui_combo_set(p->row_light_mode, &p->updating, dev->light_mode);
     as_ui_spin_set(p->row_bright, &p->updating, dev->light_brightness);
     as_ui_spin_set(p->row_speed, &p->updating, dev->light_speed);
@@ -312,7 +330,14 @@ static AdwPreferencesGroup *build_light(AsKeyboardPage *p)
     AdwPreferencesGroup *group = ADW_PREFERENCES_GROUP(adw_preferences_group_new());
 
     adw_preferences_group_set_title(group, "Подсветка");
+    adw_preferences_group_set_description(
+        group, "Галочка включает всю подсветку целиком; режим её не выключает");
     p->light_group = group;
+
+    p->sw_light = as_ui_switch_row("Подсветка включена", NULL);
+    g_signal_connect(p->sw_light, "notify::active",
+                     G_CALLBACK(apply_light_power), p);
+    adw_preferences_group_add(group, GTK_WIDGET(p->sw_light));
 
     p->row_light_mode = ADW_COMBO_ROW(adw_combo_row_new());
     adw_preferences_row_set_title(ADW_PREFERENCES_ROW(p->row_light_mode),
