@@ -872,6 +872,89 @@ static unsigned kb_key_count(int argc, char **argv, int index)
     return count > 128 ? 128 : count;
 }
 
+static const char *snap_mode_name(int mode)
+{
+    switch (mode) {
+    case AS_KB_SNAP_LAST:
+        return "last";
+    case AS_KB_SNAP_NEUTRAL:
+        return "neutral";
+    case AS_KB_SNAP_FIRST:
+        return "first";
+    case AS_KB_SNAP_SECOND:
+        return "second";
+    default:
+        return "none";
+    }
+}
+
+static int snap_mode_by_name(const char *name)
+{
+    if (!strcmp(name, "last") || !strcmp(name, "late")) {
+        return AS_KB_SNAP_LAST;
+    }
+    if (!strcmp(name, "neutral")) {
+        return AS_KB_SNAP_NEUTRAL;
+    }
+    if (!strcmp(name, "first") || !strcmp(name, "key1")) {
+        return AS_KB_SNAP_FIRST;
+    }
+    if (!strcmp(name, "second") || !strcmp(name, "key2")) {
+        return AS_KB_SNAP_SECOND;
+    }
+    return -1;
+}
+
+/* Reads the parameters the per-key commands work with. */
+static int read_key_tables(struct as_keyboard *kb, int32_t act[AS_KB_KEY_MAX],
+                           int32_t rel[AS_KB_KEY_MAX],
+                           int32_t rtp[AS_KB_KEY_MAX],
+                           int32_t rtr[AS_KB_KEY_MAX],
+                           int32_t dz[AS_KB_KEY_MAX],
+                           int32_t opt[AS_KB_KEY_MAX],
+                           int32_t pair[AS_KB_KEY_MAX])
+{
+    if (as_keyboard_get_param(kb, AS_K_MAG_ACTUATION, act, AS_KB_KEY_MAX) ||
+        as_keyboard_get_param(kb, AS_K_MAG_RELEASE, rel, AS_KB_KEY_MAX) ||
+        as_keyboard_get_param(kb, AS_K_MAG_RT_PRESS, rtp, AS_KB_KEY_MAX) ||
+        as_keyboard_get_param(kb, AS_K_MAG_RT_RELEASE, rtr, AS_KB_KEY_MAX) ||
+        as_keyboard_get_param(kb, AS_K_MAG_DEADZONE, dz, AS_KB_KEY_MAX) ||
+        as_keyboard_get_param(kb, AS_K_MAG_OPTION, opt, AS_KB_KEY_MAX) ||
+        as_keyboard_get_param(kb, AS_K_MAG_SOCD_PAIR, pair, AS_KB_KEY_MAX)) {
+        return -ENODATA;
+    }
+    return 0;
+}
+
+static void print_key_travel(struct as_keyboard *kb, int key,
+                             const int32_t *act, const int32_t *rel,
+                             const int32_t *rtp, const int32_t *rtr,
+                             const int32_t *dz, const uint8_t *opt,
+                             const uint8_t *pair)
+{
+    int mode;
+
+    mode = as_kb_snap_mode_of(opt, pair, key);
+    printf("key          %d\n", key);
+    printf("actuation    %.2f mm\n",
+           as_kb_value_to_mm(kb, AS_K_MAG_ACTUATION, act[key]));
+    printf("release      %.2f mm\n",
+           as_kb_value_to_mm(kb, AS_K_MAG_RELEASE, rel[key]));
+    printf("rt press     %.2f mm\n",
+           as_kb_value_to_mm(kb, AS_K_MAG_RT_PRESS, rtp[key]));
+    printf("rt release   %.2f mm\n",
+           as_kb_value_to_mm(kb, AS_K_MAG_RT_RELEASE, rtr[key]));
+    printf("deadzone     %.2f mm\n",
+           as_kb_value_to_mm(kb, AS_K_MAG_DEADZONE, dz[key]));
+    printf("rapid trig   %s\n",
+           (opt[key] & AS_KB_OPTION_RT) ? "on" : "off");
+    printf("snap tap     %s", snap_mode_name(mode));
+    if (mode >= 0) {
+        printf(" (paired with key %d)", pair[key]);
+    }
+    printf("\n");
+}
+
 static int cmd_keyboard(int argc, char **argv)
 {
     struct as_keyboard kb;
@@ -1075,6 +1158,167 @@ static int cmd_keyboard(int argc, char **argv)
             printf("travel applied to all keys (actuation %.2f mm, "
                    "rapid trigger %s)\n", actuation, rt ? "on" : "off");
         }
+    } else if (!strcmp(sub, "keys")) {
+        int32_t act[AS_KB_KEY_MAX], rel[AS_KB_KEY_MAX], rtp[AS_KB_KEY_MAX];
+        int32_t rtr[AS_KB_KEY_MAX], dz[AS_KB_KEY_MAX], opt[AS_KB_KEY_MAX];
+        int32_t pair[AS_KB_KEY_MAX];
+        uint8_t uopt[AS_KB_KEY_MAX] = { 0 }, upair[AS_KB_KEY_MAX] = { 0 };
+        uint32_t codes[AS_KB_KEY_MAX];
+        int have_matrix;
+
+        ret = read_key_tables(&kb, act, rel, rtp, rtr, dz, opt, pair);
+        if (ret < 0) {
+            report(ret);
+            as_keyboard_close(&kb);
+            return 1;
+        }
+        have_matrix = as_keyboard_get_keymatrix(&kb, codes) == 0;
+        for (int i = 0; i < AS_KB_KEY_MAX; i++) {
+            char name[32];
+            int mode;
+
+            if (have_matrix) {
+                as_kb_key_name(codes[i], name, sizeof(name));
+                if (!name[0]) {
+                    continue;
+                }
+            } else {
+                snprintf(name, sizeof(name), "поз.%d", i + 1);
+            }
+            uopt[i] = (uint8_t)opt[i];
+            upair[i] = pair[i] >= 0 && pair[i] < AS_KB_KEY_MAX
+                           ? (uint8_t)pair[i]
+                           : 0;
+            mode = as_kb_snap_mode_of(uopt, upair, i);
+            printf("%3d  %-10s act %.2f  rel %.2f  rt %-3s  %s", i, name,
+                   as_kb_value_to_mm(&kb, AS_K_MAG_ACTUATION, act[i]),
+                   as_kb_value_to_mm(&kb, AS_K_MAG_RELEASE, rel[i]),
+                   (opt[i] & AS_KB_OPTION_RT) ? "on" : "off",
+                   snap_mode_name(mode));
+            if (mode >= 0) {
+                printf(" with %d", pair[i]);
+            }
+            printf("\n");
+        }
+    } else if (!strcmp(sub, "key")) {
+        int32_t act[AS_KB_KEY_MAX], rel[AS_KB_KEY_MAX], rtp[AS_KB_KEY_MAX];
+        int32_t rtr[AS_KB_KEY_MAX], dz[AS_KB_KEY_MAX], opt[AS_KB_KEY_MAX];
+        int32_t pair[AS_KB_KEY_MAX];
+        uint8_t uopt[AS_KB_KEY_MAX] = { 0 }, upair[AS_KB_KEY_MAX] = { 0 };
+        const char *act_s = opt_value(argc, argv, "--actuation");
+        const char *rel_s = opt_value(argc, argv, "--release");
+        const char *rtp_s = opt_value(argc, argv, "--rt-press");
+        const char *rtr_s = opt_value(argc, argv, "--rt-release");
+        const char *dz_s = opt_value(argc, argv, "--deadzone");
+        int rt_flag = opt_flag(argc, argv, "--rt") ||
+                      opt_flag(argc, argv, "--rapid-trigger");
+        int no_rt = opt_flag(argc, argv, "--no-rt");
+        double act_mm, rel_mm, rt_press, rt_release, deadzone;
+        int key, rt;
+
+        if (argc < 2 || sscanf(argv[1], "%d", &key) != 1 || key < 0 ||
+            key >= AS_KB_KEY_MAX) {
+            return kb_usage(&kb, "key",
+                            "KEY [--actuation MM] [--release MM] [--rt|--no-rt] "
+                            "[--rt-press MM] [--rt-release MM] [--deadzone MM]");
+        }
+        ret = read_key_tables(&kb, act, rel, rtp, rtr, dz, opt, pair);
+        if (ret < 0) {
+            report(ret);
+            as_keyboard_close(&kb);
+            return 1;
+        }
+        act_mm = as_kb_value_to_mm(&kb, AS_K_MAG_ACTUATION, act[key]);
+        rel_mm = as_kb_value_to_mm(&kb, AS_K_MAG_RELEASE, rel[key]);
+        rt_press = as_kb_value_to_mm(&kb, AS_K_MAG_RT_PRESS, rtp[key]);
+        rt_release = as_kb_value_to_mm(&kb, AS_K_MAG_RT_RELEASE, rtr[key]);
+        deadzone = as_kb_value_to_mm(&kb, AS_K_MAG_DEADZONE, dz[key]);
+        rt = (opt[key] & AS_KB_OPTION_RT) != 0;
+        if (rt_flag) {
+            rt = 1;
+        }
+        if (no_rt) {
+            rt = 0;
+        }
+        if (!act_s && !rel_s && !rtp_s && !rtr_s && !dz_s && !rt_flag &&
+            !no_rt) {
+            uopt[key] = (uint8_t)opt[key];
+            upair[key] = pair[key] >= 0 && pair[key] < AS_KB_KEY_MAX
+                             ? (uint8_t)pair[key]
+                             : 0;
+            print_key_travel(&kb, key, act, rel, rtp, rtr, dz, uopt, upair);
+            as_keyboard_close(&kb);
+            return 0;
+        }
+        if (act_s) {
+            act_mm = atof(act_s);
+        }
+        if (rel_s) {
+            rel_mm = atof(rel_s);
+        }
+        if (rtp_s) {
+            rt_press = atof(rtp_s);
+        }
+        if (rtr_s) {
+            rt_release = atof(rtr_s);
+        }
+        if (dz_s) {
+            deadzone = atof(dz_s);
+        }
+        if (act_mm < 0.1 || act_mm > 4.0 || rel_mm < 0.1 || rel_mm > 4.0 ||
+            deadzone < 0.0 || deadzone > 1.0) {
+            fprintf(stderr, "attackshark: travel values out of range\n");
+            as_keyboard_close(&kb);
+            return 2;
+        }
+        ret = as_keyboard_set_key_travel(&kb, key, rt, act_mm, rel_mm,
+                                         rt_press, rt_release, deadzone);
+        if (ret < 0) {
+            report(ret);
+        } else if (!json_mode) {
+            printf("key %d: actuation %.2f mm, rapid trigger %s\n", key,
+                   act_mm, rt ? "on" : "off");
+        }
+    } else if (!strcmp(sub, "snap")) {
+        int key1, key2, mode = AS_KB_SNAP_LAST;
+
+        if (argc >= 3 && !strcmp(argv[1], "off")) {
+            if (sscanf(argv[2], "%d", &key1) != 1 || key1 < 0 ||
+                key1 >= AS_KB_KEY_MAX) {
+                return kb_usage(&kb, "snap", "off KEY");
+            }
+            ret = as_keyboard_clear_snap(&kb, key1);
+            if (ret < 0) {
+                report(ret);
+            } else if (!json_mode) {
+                printf("snap tap removed from key %d\n", key1);
+            }
+        } else {
+            if (argc < 3 || sscanf(argv[1], "%d", &key1) != 1 ||
+                sscanf(argv[2], "%d", &key2) != 1 || key1 < 0 ||
+                key1 >= AS_KB_KEY_MAX || key2 < 0 || key2 >= AS_KB_KEY_MAX ||
+                key1 == key2) {
+                return kb_usage(&kb, "snap",
+                                "KEY1 KEY2 [last|neutral|first|second] "
+                                "[--full-bottom] | off KEY");
+            }
+            if (argc > 3 && argv[3][0] != '-') {
+                mode = snap_mode_by_name(argv[3]);
+                if (mode < 0) {
+                    return kb_usage(&kb, "snap",
+                                    "KEY1 KEY2 [last|neutral|first|second] "
+                                    "[--full-bottom] | off KEY");
+                }
+            }
+            ret = as_keyboard_set_snap(&kb, key1, key2, mode,
+                                       opt_flag(argc, argv, "--full-bottom"));
+            if (ret < 0) {
+                report(ret);
+            } else if (!json_mode) {
+                printf("snap tap: keys %d and %d, %s\n", key1, key2,
+                       snap_mode_name(mode));
+            }
+        }
     } else if (!strcmp(sub, "multi-set")) {
         int32_t values[128];
         long value;
@@ -1236,6 +1480,11 @@ static void usage(void)
         "  keyboard magmode MODE       comfort|sensitive|gaming|custom\n"
         "  keyboard travel [--actuation MM] [--release MM] [--rt]\n"
         "                  [--rt-press MM] [--rt-release MM] [--deadzone MM]\n"
+        "  keyboard keys               list every key with its travel\n"
+        "  keyboard key KEY [--actuation MM] [--release MM] [--rt|--no-rt]\n"
+        "                  [--rt-press MM] [--rt-release MM] [--deadzone MM]\n"
+        "  keyboard snap KEY1 KEY2 [last|neutral|first|second] [--full-bottom]\n"
+        "  keyboard snap off KEY       remove a Snap Tap pair\n"
         "  keyboard multi PARAM [N]    raw actuation table read\n"
         "  keyboard stream [--seconds N]  live key travel monitor\n"
         "  keyboard reset              factory reset\n"

@@ -384,10 +384,34 @@ static int set_key_values(struct as_keyboard *kb, int param, int key,
                            7 + count * (size_t)width, 0, NULL, 0);
 }
 
+/* Matrix of the 68-key Royuan board behind this product id, taken from the
+ * vendor layout. The firmware here does not answer the matrix read (it echoes
+ * the request instead), so this table gives the keys their names. Positions
+ * that the 68-key layout leaves empty stay 0, which also keeps the function
+ * keys of the larger frames of the same family out of the list. */
+static const uint32_t default_matrix[AS_KB_KEY_MAX] = {
+    [1] = 41, [2] = 43, [3] = 57, [4] = 225, [5] = 224,
+    [7] = 30, [8] = 20, [9] = 4, [11] = 227,
+    [13] = 31, [14] = 26, [15] = 22, [16] = 29, [17] = 226,
+    [19] = 32, [20] = 8, [21] = 7, [22] = 27,
+    [25] = 33, [26] = 21, [27] = 9, [28] = 6,
+    [31] = 34, [32] = 23, [33] = 10, [34] = 25,
+    [37] = 35, [38] = 28, [39] = 11, [40] = 5, [41] = 44,
+    [43] = 36, [44] = 24, [45] = 13, [46] = 17,
+    [49] = 37, [50] = 12, [51] = 14, [52] = 16,
+    [55] = 38, [56] = 18, [57] = 15, [58] = 54, [59] = 230,
+    [61] = 39, [62] = 19, [63] = 51, [64] = 55, [65] = 0x0a010000,
+    [67] = 45, [68] = 47, [69] = 52, [70] = 56, [71] = 228,
+    [73] = 46, [74] = 48,
+    [76] = 229, [77] = 80,
+    [79] = 42, [80] = 49, [81] = 40, [82] = 82, [83] = 81,
+    [85] = 73, [86] = 76, [87] = 75, [88] = 78, [89] = 79,
+};
+
 int as_keyboard_get_keymatrix(struct as_keyboard *kb, uint32_t *codes)
 {
     uint8_t args[2], out[REPORT_LEN];
-    int profile = 0, ret;
+    int profile = 0, ret, plausible = 0;
 
     if (as_keyboard_cmd(kb, AS_K_GET_PROFILE, NULL, 0, 0, out,
                         HS_TIMEOUT_MS) == 0) {
@@ -399,7 +423,7 @@ int as_keyboard_get_keymatrix(struct as_keyboard *kb, uint32_t *codes)
         ret = as_keyboard_cmd(kb, AS_K_GET_KEYMATRIX, args, 2, 0, out,
                               HS_TIMEOUT_MS);
         if (ret < 0) {
-            return ret;
+            goto fallback;
         }
         for (int i = 0; i < 16; i++) {
             const uint8_t *p = out + i * 4;
@@ -409,6 +433,18 @@ int as_keyboard_get_keymatrix(struct as_keyboard *kb, uint32_t *codes)
                 ((uint32_t)p[2] << 8) | (uint32_t)p[3];
         }
     }
+    /* An echo of the request leaves the command byte and the checksum, but
+     * not a key for every position: treat that as "not supported". */
+    for (int i = 0; i < AS_KB_KEY_MAX; i++) {
+        if (codes[i] && codes[i] != 0x89000000u) {
+            plausible++;
+        }
+    }
+    if (plausible >= 16) {
+        return 0;
+    }
+fallback:
+    memcpy(codes, default_matrix, sizeof(default_matrix));
     return 0;
 }
 
