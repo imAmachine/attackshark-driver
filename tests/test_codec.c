@@ -146,6 +146,22 @@ static void test_snap(void)
     printf("snap tap codec ok\n");
 }
 
+static void test_analog(void)
+{
+    int32_t travel[AS_KB_KEY_MAX] = { 0 };
+    uint8_t report[] = { 0x05, 0x1b, 0x5e, 0x01, 0x09,
+                         0x1b, 0x00, 0x00, 0x15 };
+
+    assert(as_kb_parse_analog(report, sizeof(report), travel) == 1);
+    /* 0x015e = 350 units, the full 3.4 mm stroke. */
+    assert(travel[9] == 3400);
+    assert(travel[0x15] == 0);
+    assert(as_kb_parse_analog(report, 2, travel) == 0);
+    report[0] = 0x04;
+    assert(as_kb_parse_analog(report, sizeof(report), travel) == 0);
+    printf("analog stream ok\n");
+}
+
 int main(void)
 {
     test_dpi();
@@ -153,6 +169,7 @@ int main(void)
     test_travel();
     test_travel_precision();
     test_snap();
+    test_analog();
     printf("all tests passed\n");
     return 0;
 }

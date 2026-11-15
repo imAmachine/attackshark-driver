@@ -408,6 +408,36 @@ static const uint32_t default_matrix[AS_KB_KEY_MAX] = {
     [85] = 73, [86] = 76, [87] = 75, [88] = 78, [89] = 79,
 };
 
+int as_kb_parse_analog(const uint8_t *buf, size_t len, int32_t *travel)
+{
+    int found = 0;
+
+    if (!buf || !travel || len < 5 || buf[0] != 0x05) {
+        return 0;
+    }
+    for (size_t i = 1; i + 3 < len; i++) {
+        int32_t raw;
+        int key;
+
+        if (buf[i] != 0x1b) {
+            continue;
+        }
+        raw = buf[i + 1] | (buf[i + 2] << 8);
+        key = buf[i + 3];
+        if (key < 0 || key >= AS_KB_KEY_MAX) {
+            continue;
+        }
+        /* The stream reports about 350 units over the 3.4 mm full travel. */
+        travel[key] = raw * 3400 / 350;
+        if (travel[key] > 5000) {
+            travel[key] = 5000;
+        }
+        found = 1;
+        i += 3;
+    }
+    return found;
+}
+
 int as_keyboard_get_keymatrix(struct as_keyboard *kb, uint32_t *codes)
 {
     uint8_t args[2], out[REPORT_LEN];

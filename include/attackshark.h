@@ -351,6 +351,9 @@ int as_keyboard_set_keys_travel(struct as_keyboard *kb,
 /* Reads the key code of every matrix position, so the UI can name the keys
  * instead of showing their indices. Unknown positions read as 0. */
 int as_keyboard_get_keymatrix(struct as_keyboard *kb, uint32_t *codes);
+/* Parses one analog-stream report into travel per matrix position, in
+ * thousandths of a millimetre. Returns 1 when the report carried key data. */
+int as_kb_parse_analog(const uint8_t *buf, size_t len, int32_t *travel);
 /* Snap Tap: pairs two keys, and the firmware decides which one stays pressed
  * while both are held. mode is one of as_kb_snap_mode. */
 int as_keyboard_set_snap(struct as_keyboard *kb, int key1, int key2, int mode,
