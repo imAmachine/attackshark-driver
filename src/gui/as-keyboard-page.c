@@ -211,7 +211,7 @@ static void update_page(AsKeyboardPage *p)
     p->updating = TRUE;
 
     adw_banner_set_revealed(p->banner, dev->error[0] != 0);
-    adw_banner_set_title(p->banner, dev->error);
+    adw_banner_set_title(p->banner, as_ui_error(dev));
 
     if (dev->usb_version_valid) {
         snprintf(buf, sizeof(buf), "%u (0x%04x)", dev->usb_version,

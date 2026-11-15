@@ -41,6 +41,9 @@ void as_ui_color_set(GtkColorDialogButton *button, gboolean *guard,
 
 char *as_ui_mouse_summary(const AsDevice *dev);
 char *as_ui_keyboard_summary(const AsDevice *dev);
+/* One-line explanation for a page banner or a row. The permission problem can
+ * be solved from inside the app, so it must not read like a dead end. */
+const char *as_ui_error(const AsDevice *dev);
 
 G_END_DECLS
 

@@ -20,6 +20,14 @@
 (`0xFFFF/0x02` у клавиатур и `0xFF02` у мышей), поэтому новые PID в этих
 семействах обычно работают без правок кода.
 
+Составное устройство показывается одной строкой. Например, R85 HE — это
+три HID-интерфейса (boot-клавиатура, потребительские/системные клавиши и
+вендорская коллекция настроек), то есть три узла `/dev/hidraw` с одним и
+тем же `3151:5029`. Драйвер склеивает узлы одного физического устройства
+по `HID_PHYS` и оставляет тот, в котором есть вендорская коллекция, так что
+в списке (`attackshark list` и GUI) на одну клавиатуру приходится ровно
+одна строка.
+
 ### Bluetooth
 
 `attackshark list` показывает мышь и по Bluetooth, но настроек по этому
@@ -73,12 +81,37 @@ make gui        # только GUI: ./attackshark-gui
 make test       # проверка кодеков DPI, частоты опроса и хода клавиш
 sudo make install
 sudo make install-gui     # бинарник, .desktop и иконка
-sudo udevadm control --reload && sudo udevadm trigger
 ```
 
 `make install` ставит бинарник в `/usr/local/bin`, правила udev
 (`/etc/udev/rules.d/99-attackshark.rules`) и юнит
 `/etc/systemd/system/attackshark.service`.
+
+Если ставите драйвер не из пакета (или просто распаковали архив), правила
+udev руками копировать не нужно: драйвер ставит их сам.
+
+```sh
+sudo attackshark permissions          # нужны ли правила этому пользователю
+sudo attackshark permissions install  # записать правила и перезапустить udev
+```
+
+В GUI это одна кнопка: при `permission denied` сверху появляется баннер
+«Нет доступа к устройствам: нужны правила udev» с кнопкой «Исправить». Она
+запускает тот же установщик через `pkexec` (пароль администратора), после
+чего hidraw-узлы, уже подключённые к системе, сразу получают доступ —
+переподключать и перелогиниваться не нужно. Если GUI запущен от root,
+драйвер исправляет права сам, без вопроса. Запрос пароля в GUI подписан
+через polkit (`data/org.attackshark.permissions.policy.in`), поэтому
+пользователь видит, зачем его спрашивают, а не безликое «pkexec».
+
+Правила используют `TAG+="uaccess"` из systemd-udevd: доступ получает
+активный пользователь сессии. Там, где uaccess нет (без systemd), нужно
+своё правило с группой — но тогда его пишет уже администратор, а не драйвер.
+
+Правила сопоставляются по VID семейства (`3151` — клавиатуры Royuan,
+`3554` — мыши Compx), а не по конкретному PID, поэтому новая модель или
+новая прошивка с другим product id больше не требует ни новых правил, ни
+нового файла.
 
 У CLI зависимостей нет: используется только `hidraw`, `ioctl` и `select`.
 GUI требует GTK4 и libadwaita; если их нет, `make` просто собирает CLI.
@@ -100,7 +133,8 @@ attackshark keyboard light --mode wave --brightness 3 --speed 2 --color 00a0ff
 attackshark keyboard travel --actuation 1.5 --rt --rt-press 0.2 --deadzone 0.2
 ```
 
-Полный список: `attackshark --help`.
+Полный список: `attackshark --help`. Проверка прав доступа и установка
+правил udev — `attackshark permissions` / `attackshark permissions install`.
 
 ## Графический интерфейс
 
@@ -114,6 +148,11 @@ attackshark keyboard travel --actuation 1.5 --rt --rt-press 0.2 --deadzone 0.2
 ```sh
 make gui && ./attackshark-gui
 ```
+
+Если hidraw-узлы принадлежат root, сверху окна появляется баннер «Нет
+доступа к устройствам: нужны правила udev» с кнопкой «Исправить»: она
+ставит правила через `pkexec` и сразу открывает доступ к уже подключённым
+устройствам. В списке одно физическое устройство занимает одну строку.
 
 GUI линкуется с тем же драйвером, что и CLI, поэтому оба инструмента
 одинаково видят устройства и настройки. Все обращения к hidraw идут через
@@ -177,13 +216,15 @@ sudo systemctl enable --now attackshark.service
 
 ## Диагностика
 
-**«permission denied»** — не установлены udev-правила или пользователь не
-перелогинился после их установки:
+**«permission denied»** — пользователю не разрешено открывать узел
+`/dev/hidraw*`. Правила udev ставит сам драйвер:
 
 ```sh
-sudo cp udev/99-attackshark.rules /etc/udev/rules.d/
-sudo udevadm control --reload && sudo udevadm trigger
+sudo attackshark permissions install
 ```
+
+или кнопка «Исправить» в окне GUI (то же самое через `pkexec`). Проверить
+состояние: `attackshark permissions`.
 
 **`link offline`, нет батареи/DPI** — мышь выключена или спит. Включите её
 и пошевелите, затем повторите команду.
@@ -206,10 +247,11 @@ src/hidraw.c            поиск hidraw-узлов, feature/interrupt обме
 src/mouse.c             протокол мыши (Control HUB)
 src/keyboard.c          протокол клавиатуры (GearHub)
 src/util.c              строки ошибок, названия моделей и режимов
+src/udev.c              правила udev: текст, установка, проверка состояния
 src/main.c              CLI
 src/gui/                GUI на GTK4 (воркер, реестр устройств, страницы)
 tests/test_codec.c      тесты кодеков
-data/                   .desktop и иконка GUI
+data/                   .desktop, иконка GUI, policy-файл polkit для pkexec
 udev/, systemd/, etc/   установка и автозапуск
 docs/PROTOCOL.md        описание протоколов
 docs/GUI.md             архитектура GUI

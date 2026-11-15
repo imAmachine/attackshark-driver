@@ -13,6 +13,16 @@
 static int json_mode;
 static int optional_mode;
 
+/* The driver installs its own udev rules; point the user at that instead of
+ * asking them to copy a file into /etc by hand. */
+static void note_udev(void)
+{
+    fprintf(stderr,
+            "            run \"sudo attackshark permissions install\" to grant "
+            "access,\n"
+            "            or press \"Исправить\" in attackshark-gui\n");
+}
+
 static const char *mag_mode_names[] = { "comfort", "sensitive", "gaming", "custom" };
 
 static int parse_bool(const char *s, int *value)
@@ -85,10 +95,13 @@ static int opt_flag(int argc, char **argv, const char *name)
 static int cmd_list(void)
 {
     struct as_hid found[16];
-    int n = as_hid_find(NULL, 0, found, 16);
+    /* One entry per physical device: a composite keyboard such as the R85 HE
+     * publishes three hidraw nodes, and only one of them has settings. */
+    int n = as_hid_list_devices(found, 16);
     int first = 1;
     int bt_hint = 0;
     int configurable_mouse = 0;
+    int denied = 0;
 
     if (json_mode) {
         printf("[");
@@ -98,6 +111,7 @@ static int cmd_list(void)
         const char *product = "unknown";
         int bluetooth = as_hid_is_bluetooth(&found[i]);
         int configurable;
+        int accessible = access(found[i].path, R_OK | W_OK) == 0;
 
         if (as_hid_is_keyboard(&found[i])) {
             kind = "keyboard";
@@ -115,19 +129,25 @@ static int cmd_list(void)
         if (configurable && !strcmp(kind, "mouse")) {
             configurable_mouse = 1;
         }
+        if (!accessible) {
+            denied++;
+        }
         if (json_mode) {
             printf("%s{\"kind\":\"%s\",\"path\":\"%s\",\"vid\":%u,"
                    "\"pid\":%u,\"interface\":%d,\"product\":\"%s\","
-                   "\"transport\":\"%s\",\"configurable\":%s}",
+                   "\"transport\":\"%s\",\"configurable\":%s,"
+                   "\"accessible\":%s}",
                    first ? "" : ",", kind, found[i].path, found[i].vid,
                    found[i].pid, found[i].iface, product,
                    bluetooth ? "bluetooth" : "usb",
-                   configurable ? "true" : "false");
+                   configurable ? "true" : "false",
+                   accessible ? "true" : "false");
         } else {
-            printf("%-8s %s  %04x:%04x  iface %d  %-3s %s%s\n", kind,
+            printf("%-8s %s  %04x:%04x  iface %d  %-3s %s%s%s\n", kind,
                    found[i].path, found[i].vid, found[i].pid, found[i].iface,
                    bluetooth ? "bt" : "usb", product,
-                   configurable ? "" : "  (settings unavailable)");
+                   configurable ? "" : "  (settings unavailable)",
+                   accessible ? "" : "  (no access)");
         }
         first = 0;
     }
@@ -141,6 +161,79 @@ static int cmd_list(void)
                         "HID collections;\n"
                         "      DPI, polling rate and lighting need the "
                         "2.4 GHz receiver or a cable.\n");
+    }
+    if (denied) {
+        fprintf(stderr, "note: %d device node(s) are not readable by this "
+                        "user;\n", denied);
+        note_udev();
+    }
+    return 0;
+}
+
+/* --------------------------- permissions --------------------------- */
+
+static int cmd_permissions(int argc, char **argv)
+{
+    const char *sub = argc > 0 ? argv[0] : "status";
+    char err[256] = "";
+    int ret;
+
+    if (!strcmp(sub, "install")) {
+        ret = as_udev_install(err, sizeof(err));
+        if (ret < 0) {
+            fprintf(stderr, "attackshark: %s\n",
+                    err[0] ? err : as_strerror(ret));
+            if (ret == -EPERM) {
+                fprintf(stderr, "            run \"sudo attackshark "
+                                "permissions install\"\n");
+            }
+            return 1;
+        }
+        printf("installed %s\n", as_udev_rule_path());
+        return 0;
+    }
+    if (strcmp(sub, "status")) {
+        fprintf(stderr, "usage: attackshark permissions [status|install]\n");
+        return 2;
+    }
+
+    struct as_hid found[16];
+    int n = as_hid_list_devices(found, 16);
+    int denied = 0;
+
+    for (int i = 0; i < n; i++) {
+        if (access(found[i].path, R_OK | W_OK) != 0) {
+            denied++;
+        }
+    }
+    if (json_mode) {
+        printf("{\"rules_file\":\"%s\",\"installed\":%s,\"root\":%s,"
+               "\"devices\":[",
+               as_udev_rule_path(), as_udev_rules_installed() ? "true" : "false",
+               as_udev_can_install() ? "true" : "false");
+        for (int i = 0; i < n; i++) {
+            printf("%s{\"path\":\"%s\",\"accessible\":%s}", i ? "," : "",
+                   found[i].path,
+                   access(found[i].path, R_OK | W_OK) == 0 ? "true" : "false");
+        }
+        printf("]}\n");
+    } else {
+        printf("rules file  %s\n", as_udev_rule_path());
+        printf("installed   %s\n",
+               as_udev_rules_installed() ? "yes" : "no");
+        if (!n) {
+            printf("devices     none\n");
+        }
+        for (int i = 0; i < n; i++) {
+            printf("device      %s  %s\n", found[i].path,
+                   access(found[i].path, R_OK | W_OK) == 0 ? "ok"
+                                                           : "no access");
+        }
+    }
+    if (denied) {
+        fprintf(stderr, "note: %d device node(s) are not readable by this "
+                        "user;\n", denied);
+        note_udev();
     }
     return 0;
 }
@@ -165,6 +258,9 @@ static int cmd_mouse(int argc, char **argv)
             fprintf(stderr, "attackshark: mouse not found\n");
         } else {
             fprintf(stderr, "attackshark: %s\n", as_strerror(ret));
+            if (ret == -EACCES) {
+                note_udev();
+            }
         }
         as_mouse_close(&m);
         return 1;
@@ -639,8 +735,21 @@ static int cmd_keyboard(int argc, char **argv)
     struct as_kb_state st;
     int ret = 0;
 
-    if (as_keyboard_open(&kb) < 0) {
-        fprintf(stderr, "attackshark: keyboard not found\n");
+    ret = as_keyboard_open(&kb);
+    if (ret < 0) {
+        struct as_hid bt;
+
+        if (ret == -ENOTSUP && as_keyboard_find_bluetooth(&bt)) {
+            fprintf(stderr, "attackshark: R85 HE at %s, but %s\n", bt.path,
+                    as_strerror(ret));
+        } else if (ret == -ENODEV) {
+            fprintf(stderr, "attackshark: keyboard not found\n");
+        } else {
+            fprintf(stderr, "attackshark: %s\n", as_strerror(ret));
+            if (ret == -EACCES) {
+                note_udev();
+            }
+        }
         return 1;
     }
 
@@ -1125,6 +1234,10 @@ static void usage(void)
         "\n"
         "  apply FILE                  run commands from FILE\n"
         "\n"
+        "  permissions [status|install]\n"
+        "                              show or install the udev rules that\n"
+        "                              give the user access to hidraw\n"
+        "\n"
         "Light modes: ");
     for (int i = 0; i < as_light_mode_count(); i++) {
         printf("%s%s", i ? ", " : "", as_light_mode_name(i));
@@ -1153,6 +1266,9 @@ static int run_argv(int argc, char **argv)
             return 2;
         }
         return cmd_apply(argv[1]);
+    }
+    if (!strcmp(argv[0], "permissions")) {
+        return cmd_permissions(argc - 1, argv + 1);
     }
     if (!strcmp(argv[0], "help") || !strcmp(argv[0], "--help") ||
         !strcmp(argv[0], "-h")) {

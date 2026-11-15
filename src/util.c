@@ -9,7 +9,9 @@ const char *as_strerror(int err)
 {
     switch (-err) {
     case ENODEV: return "device not found";
-    case EACCES: return "permission denied (install the udev rules)";
+    case EACCES:
+        return "permission denied: the hidraw node is root-owned, install the "
+               "udev rules";
     case ETIMEDOUT: return "device did not answer (is it awake / plugged in?)";
     case EPROTO: return "unexpected reply from device";
     case ENODATA: return "device returned no data";

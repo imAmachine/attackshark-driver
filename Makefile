@@ -7,7 +7,7 @@ LDLIBS     ?=
 AR         ?= ar
 
 # Driver core shared by the CLI and the GUI.
-LIB_SRC := src/hidraw.c src/mouse.c src/keyboard.c src/util.c
+LIB_SRC := src/hidraw.c src/mouse.c src/keyboard.c src/util.c src/udev.c
 LIB_OBJ := $(LIB_SRC:.c=.o)
 LIB     := libattackshark.a
 
@@ -34,6 +34,7 @@ UDEVDIR    ?= /etc/udev/rules.d
 SYSTEMDDIR ?= /etc/systemd/system
 DESKTOPDIR ?= $(PREFIX)/share/applications
 ICONDIR    ?= $(PREFIX)/share/icons/hicolor/scalable/apps
+POLKITDIR  ?= /usr/share/polkit-1/actions
 
 .PHONY: all gui clean install install-gui uninstall check test test-store compiledb
 
@@ -70,6 +71,10 @@ install-gui: $(GUI)
 		$(DESTDIR)$(DESKTOPDIR)/attackshark-gui.desktop
 	install -Dm644 data/attackshark-gui.svg \
 		$(DESTDIR)$(ICONDIR)/attackshark-gui.svg
+	install -d $(DESTDIR)$(POLKITDIR)
+	sed 's|@BINDIR@|$(BINDIR)|g' data/org.attackshark.permissions.policy.in \
+		> $(DESTDIR)$(POLKITDIR)/org.attackshark.permissions.policy
+	chmod 644 $(DESTDIR)$(POLKITDIR)/org.attackshark.permissions.policy
 
 uninstall:
 	rm -f $(DESTDIR)$(BINDIR)/$(BIN)
@@ -78,6 +83,7 @@ uninstall:
 	rm -f $(DESTDIR)$(BINDIR)/$(GUI)
 	rm -f $(DESTDIR)$(DESKTOPDIR)/attackshark-gui.desktop
 	rm -f $(DESTDIR)$(ICONDIR)/attackshark-gui.svg
+	rm -f $(DESTDIR)$(POLKITDIR)/org.attackshark.permissions.policy
 
 tests/test_codec: tests/test_codec.c $(LIB)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ tests/test_codec.c $(LIB) -lm

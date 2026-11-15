@@ -13,6 +13,7 @@
 enum {
     SIGNAL_CHANGED,
     SIGNAL_ERROR,
+    SIGNAL_PERMISSIONS_FIXED,
     N_SIGNALS,
 };
 
@@ -165,6 +166,7 @@ static void fill_mouse(Handle *h, AsDevice *dev)
 
     if (rc < 0) {
         snprintf(dev->error, sizeof(dev->error), "%s", as_strerror(rc));
+        dev->permission_denied = rc == -EACCES;
         if (rc == -ENODEV || rc == -EIO) {
             handle_close(h);
         }
@@ -211,6 +213,7 @@ static void fill_keyboard(Handle *h, AsDevice *dev)
 
     if (rc < 0) {
         snprintf(dev->error, sizeof(dev->error), "%s", as_strerror(rc));
+        dev->permission_denied = rc == -EACCES;
         if (rc == -ENODEV || rc == -EIO) {
             handle_close(h);
         }
@@ -284,6 +287,7 @@ static void refresh_one(AsStore *self, const struct as_hid *hid, int kind,
     rc = handle_open(h);
     if (rc < 0) {
         snprintf(dev->error, sizeof(dev->error), "%s", as_strerror(rc));
+        dev->permission_denied = rc == -EACCES;
     } else if (h->kind == AS_DEVICE_MOUSE) {
         fill_mouse(h, dev);
     } else {
@@ -315,7 +319,9 @@ static void refresh_job_run(gpointer data, GError **error)
     } else {
         struct as_hid found[16];
         GHashTable *present = g_hash_table_new(g_str_hash, g_str_equal);
-        int n = as_hid_find(NULL, 0, found, 16);
+        /* One entry per physical device: the composite interfaces of a
+         * keyboard or mouse must not show up as extra devices. */
+        int n = as_hid_list_devices(found, 16);
 
         for (int i = 0; i < n; i++) {
             int kind = classify(&found[i]);
@@ -662,6 +668,56 @@ guint as_store_count(AsStore *self)
     return self->devices->len;
 }
 
+gboolean as_store_permissions_denied(AsStore *self)
+{
+    for (guint i = 0; i < self->devices->len; i++) {
+        AsDevice *dev = self->devices->pdata[i];
+
+        if (dev->permission_denied) {
+            return TRUE;
+        }
+    }
+    return FALSE;
+}
+
+static void fix_permissions_run(gpointer data, GError **error)
+{
+    char message[256] = "";
+
+    (void)data;
+    if (as_udev_install(message, sizeof(message)) < 0) {
+        g_set_error(error, G_IO_ERROR, G_IO_ERROR_FAILED, "%s",
+                    message[0] ? message : "cannot install the udev rules");
+    }
+}
+
+static void fix_permissions_done(gpointer data, GError *error,
+                                 gpointer user_data)
+{
+    AsStore *self = data;
+
+    (void)user_data;
+    self->busy = FALSE;
+    if (error) {
+        g_signal_emit(self, signals[SIGNAL_ERROR], 0, (const char *)NULL,
+                      error->message);
+    } else {
+        g_signal_emit(self, signals[SIGNAL_PERMISSIONS_FIXED], 0);
+    }
+    as_store_scan(self);
+}
+
+void as_store_fix_permissions(AsStore *self)
+{
+    g_return_if_fail(AS_IS_STORE(self));
+    if (self->busy) {
+        return;
+    }
+    self->busy = TRUE;
+    as_job_run(fix_permissions_run, self, NULL, fix_permissions_done, NULL,
+               NULL);
+}
+
 gboolean as_store_apply(AsStore *self, const char *path, const AsOpRequest *req)
 {
     ApplyJob *job;
@@ -709,6 +765,9 @@ static void as_store_class_init(AsStoreClass *klass)
         g_signal_new("error", G_TYPE_FROM_CLASS(klass), G_SIGNAL_RUN_LAST, 0,
                      NULL, NULL, NULL, G_TYPE_NONE, 2, G_TYPE_STRING,
                      G_TYPE_STRING);
+    signals[SIGNAL_PERMISSIONS_FIXED] =
+        g_signal_new("permissions-fixed", G_TYPE_FROM_CLASS(klass),
+                     G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 0);
 }
 
 static void as_store_init(AsStore *self)

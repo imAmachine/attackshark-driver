@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 #include "as-window.h"
 
+#include <glib/gstdio.h>
 #include <string.h>
 
 #include "as-keyboard-page.h"
@@ -18,12 +19,15 @@ typedef struct {
     GtkWidget *list;
     GtkWidget *stack;
     GtkWidget *toast_overlay;
+    AdwBanner *banner;
     AdwWindowTitle *title;
     GHashTable *rows;      /* path -> GtkListBoxRow* */
     GHashTable *pages;     /* path -> page widget */
     char *selected;
     int prefer_kind;   /* AS_DEVICE_* to preselect, or -1 */
     guint refresh_id;
+    gboolean fixing;        /* an install attempt is running */
+    gboolean auto_fixed;    /* the silent root path was already tried */
 } AsWindow;
 
 static AsWindow *window_of(gpointer widget)
@@ -191,6 +195,115 @@ static void sync_rows(AsWindow *w)
     }
 }
 
+/* --------------------------- permissions ------------------------------ */
+
+static void show_toast(AsWindow *w, const char *message)
+{
+    adw_toast_overlay_add_toast(ADW_TOAST_OVERLAY(w->toast_overlay),
+                                adw_toast_new(message));
+}
+
+/* The fix is one click: the helper mode of this very binary writes the rules
+ * file and re-triggers udev. pkexec asks for the password; when the app is
+ * already running as root no prompt is needed and the driver just does it. */
+static void on_fix_helper_done(GObject *source, GAsyncResult *res,
+                               gpointer data)
+{
+    AsWindow *w = data;
+    char *out = NULL, *errtext = NULL;
+    GError *error = NULL;
+
+    w->fixing = FALSE;
+    if (!g_subprocess_communicate_utf8_finish(G_SUBPROCESS(source), res, &out,
+                                              &errtext, &error)) {
+        show_toast(w, error->message);
+        g_clear_error(&error);
+        g_free(out);
+        g_free(errtext);
+        return;
+    }
+    if (!g_subprocess_get_successful(G_SUBPROCESS(source))) {
+        char *message = errtext && errtext[0]
+                            ? g_strstrip(errtext)
+                            : g_strdup("Не удалось установить правила udev");
+        show_toast(w, message);
+        g_free(message);
+        g_free(out);
+        g_free(errtext);
+        return;
+    }
+    g_free(out);
+    g_free(errtext);
+    adw_banner_set_revealed(w->banner, FALSE);
+    show_toast(w, "Правила udev установлены");
+    as_store_scan(w->store);
+}
+
+static void on_fix_clicked(AdwBanner *banner, gpointer widget)
+{
+    AsWindow *w = window_of(widget);
+    GError *error = NULL;
+    GSubprocess *proc;
+    char *self = g_file_read_link("/proc/self/exe", NULL);
+
+    (void)banner;
+    if (w->fixing || as_store_busy(w->store)) {
+        return;
+    }
+    if (as_udev_can_install()) {
+        w->fixing = TRUE;
+        as_store_fix_permissions(w->store);
+        return;
+    }
+    if (!self) {
+        show_toast(w, "Не удалось определить путь к программе");
+        return;
+    }
+    proc = g_subprocess_new(G_SUBPROCESS_FLAGS_STDOUT_SILENCE |
+                                G_SUBPROCESS_FLAGS_STDERR_PIPE,
+                            &error, "pkexec", self, "--udev-install", NULL);
+    if (!proc) {
+        char message[256];
+        snprintf(message, sizeof(message),
+                 "%s — выполните «sudo attackshark permissions install»",
+                 error->message);
+        show_toast(w, message);
+        g_clear_error(&error);
+        g_free(self);
+        return;
+    }
+    w->fixing = TRUE;
+    g_subprocess_communicate_utf8_async(proc, NULL, NULL, on_fix_helper_done, w);
+    g_object_unref(proc);
+    g_free(self);
+}
+
+static void on_permissions_fixed(AsStore *store, gpointer widget)
+{
+    AsWindow *w = window_of(widget);
+
+    (void)store;
+    w->fixing = FALSE;
+    adw_banner_set_revealed(w->banner, FALSE);
+    show_toast(w, "Правила udev установлены");
+}
+
+static void sync_permissions(AsWindow *w)
+{
+    gboolean denied = as_store_permissions_denied(w->store);
+
+    adw_banner_set_revealed(w->banner, denied);
+    if (!denied || w->fixing || w->auto_fixed || as_store_busy(w->store)) {
+        return;
+    }
+    /* Already root: there is nobody to ask, so fix it instead of nagging. */
+    if (as_udev_can_install()) {
+        w->auto_fixed = TRUE;
+        w->fixing = TRUE;
+        as_store_fix_permissions(w->store);
+    }
+}
+
 /* ------------------------------ callbacks ----------------------------- */
 
 static void on_store_changed(AsStore *store, gpointer widget)
@@ -199,6 +312,7 @@ static void on_store_changed(AsStore *store, gpointer widget)
 
     (void)store;
     sync_rows(w);
+    sync_permissions(w);
 }
 
 static void on_store_error(AsStore *store, const char *path,
@@ -208,7 +322,10 @@ static void on_store_error(AsStore *store, const char *path,
     AdwToast *toast = adw_toast_new(message);
 
     (void)store;
-    (void)path;
+    /* A failed install must not leave the fix button latched off. */
+    if (!path && w->fixing) {
+        w->fixing = FALSE;
+    }
     adw_toast_overlay_add_toast(ADW_TOAST_OVERLAY(w->toast_overlay), toast);
 }
 
@@ -289,7 +406,8 @@ static GtkWidget *build_sidebar(AsWindow *w)
     adw_status_page_set_description(
         ADW_STATUS_PAGE(placeholder),
         "Подключите мышь или клавиатуру Attack Shark по USB. Если устройство "
-        "подключено, проверьте правила udev: без них hidraw-узлы недоступны.");
+        "подключено, нажмите «Исправить» в шапке окна: драйвер сам установит "
+        "правила udev и откроет доступ к hidraw.");
 
     w->list = gtk_list_box_new();
     gtk_list_box_set_selection_mode(GTK_LIST_BOX(w->list), GTK_SELECTION_SINGLE);
@@ -375,9 +493,20 @@ GtkWidget *as_window_new(GtkApplication *app)
     content_page = adw_navigation_page_new(build_content(w), "Настройки");
     adw_navigation_split_view_set_content(split, content_page);
 
+    /* Root-owned hidraw nodes are the one problem the app can solve for the
+     * user, so it says so in one line and offers a single button. */
+    w->banner = ADW_BANNER(
+        adw_banner_new("Нет доступа к устройствам: нужны правила udev"));
+    adw_banner_set_button_label(w->banner, "Исправить");
+    adw_banner_set_revealed(w->banner, FALSE);
+
+    GtkWidget *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+    gtk_box_append(GTK_BOX(box), GTK_WIDGET(w->banner));
+    gtk_box_append(GTK_BOX(box), GTK_WIDGET(split));
+    gtk_widget_set_vexpand(GTK_WIDGET(split), TRUE);
+
     w->toast_overlay = adw_toast_overlay_new();
-    adw_toast_overlay_set_child(ADW_TOAST_OVERLAY(w->toast_overlay),
-                                GTK_WIDGET(split));
+    adw_toast_overlay_set_child(ADW_TOAST_OVERLAY(w->toast_overlay), box);
     adw_application_window_set_content(ADW_APPLICATION_WINDOW(window),
                                        w->toast_overlay);
 
@@ -385,6 +514,10 @@ GtkWidget *as_window_new(GtkApplication *app)
                             window, 0);
     g_signal_connect_object(w->store, "error", G_CALLBACK(on_store_error),
                             window, 0);
+    g_signal_connect_object(w->store, "permissions-fixed",
+                            G_CALLBACK(on_permissions_fixed), window, 0);
+    g_signal_connect_object(w->banner, "button-clicked",
+                            G_CALLBACK(on_fix_clicked), window, 0);
     g_signal_connect_object(window, "map", G_CALLBACK(on_window_map), NULL, 0);
 
     w->refresh_id = g_timeout_add_seconds(AUTO_REFRESH_SECONDS, on_auto_refresh,

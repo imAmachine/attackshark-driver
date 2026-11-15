@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 #include <adwaita.h>
 #include <cairo.h>
+#include <string.h>
 
 #include "as-store.h"
 #include "as-window.h"
@@ -58,10 +59,33 @@ static void on_activate(GtkApplication *app, gpointer user_data)
     }
 }
 
+/* Privileged helper mode. The window runs itself through pkexec with this
+ * flag when the hidraw nodes are root-owned, so the fix is one click and no
+ * terminal or manual rule copying is involved. */
+static int run_udev_install(void)
+{
+    char err[256] = "";
+    int rc = as_udev_install(err, sizeof(err));
+
+    if (rc < 0) {
+        fprintf(stderr, "attackshark-gui: %s\n",
+                err[0] ? err : as_strerror(rc));
+        return 1;
+    }
+    printf("installed %s\n", as_udev_rule_path());
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     AdwApplication *app;
     int status;
+
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--udev-install") == 0) {
+            return run_udev_install();
+        }
+    }
 
     g_set_application_name("Attack Shark");
     app = adw_application_new("org.attackshark.Gui",

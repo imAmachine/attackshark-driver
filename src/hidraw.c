@@ -153,6 +153,12 @@ int as_hid_find(const unsigned char *probe, size_t probe_len,
                 memcpy(dev.product, line + 9, n);
                 dev.product[n] = 0;
             } else if (strncmp(line, "HID_PHYS=", 9) == 0) {
+                size_t n = strcspn(line + 9, "\n");
+                if (n > sizeof(dev.phys) - 1) {
+                    n = sizeof(dev.phys) - 1;
+                }
+                memcpy(dev.phys, line + 9, n);
+                dev.phys[n] = 0;
                 dev.iface = parse_iface(line + 9);
             }
         }
@@ -182,6 +188,95 @@ int as_hid_find(const unsigned char *probe, size_t probe_len,
     }
     closedir(dir);
     return found;
+}
+
+/* Identity of the physical device a node belongs to. USB interfaces append
+ * "/inputN" to HID_PHYS, so the part before the slash is shared by all of
+ * them; a Bluetooth link has no suffix and is its own device. A node without
+ * HID_PHYS keeps its own path, so nothing is merged on a guess. */
+static void device_key(const struct as_hid *dev, char *key, size_t len)
+{
+    size_t n = strcspn(dev->phys, "/");
+
+    if (n == 0) {
+        snprintf(key, len, "%u:%s", dev->bus, dev->path);
+        return;
+    }
+    snprintf(key, len, "%u:%.*s", dev->bus, (int)n, dev->phys);
+}
+
+/* The settings node is the one the driver talks to, so it represents the
+ * device; without vendor collections (Bluetooth) the first node is kept. */
+static int node_rank(const struct as_hid *dev)
+{
+    if (as_hid_has_vendor(dev)) {
+        return 2;
+    }
+    return as_hid_is_bluetooth(dev) ? 1 : 0;
+}
+
+static int compare_nodes(const void *a, const void *b)
+{
+    const struct as_hid *left = a;
+    const struct as_hid *right = b;
+
+    return strcmp(left->path, right->path);
+}
+
+int as_hid_dedupe(struct as_hid *nodes, int count)
+{
+    struct as_hid *keys;
+    int kept = 0;
+
+    if (!nodes || count <= 0) {
+        return 0;
+    }
+    keys = calloc((size_t)count, sizeof(*keys));
+    if (!keys) {
+        return count;
+    }
+
+    for (int i = 0; i < count; i++) {
+        char key[128], known[128];
+        int slot = -1;
+
+        device_key(&nodes[i], key, sizeof(key));
+        for (int j = 0; j < kept; j++) {
+            device_key(&keys[j], known, sizeof(known));
+            if (strcmp(key, known) == 0) {
+                slot = j;
+                break;
+            }
+        }
+        if (slot < 0) {
+            keys[kept] = nodes[i];
+            nodes[kept++] = nodes[i];
+        } else if (node_rank(&nodes[i]) > node_rank(&keys[slot])) {
+            keys[slot] = nodes[i];
+            nodes[slot] = nodes[i];
+        }
+    }
+    free(keys);
+
+    qsort(nodes, (size_t)kept, sizeof(*nodes), compare_nodes);
+    return kept;
+}
+
+int as_hid_list_devices(struct as_hid *out, int max)
+{
+    struct as_hid found[32];
+    int n = as_hid_find(NULL, 0, found, 32);
+    int kept = 0;
+
+    for (int i = 0; i < n; i++) {
+        if (!as_hid_is_keyboard(&found[i]) && !as_hid_is_mouse(&found[i])) {
+            continue;
+        }
+        if (kept < max) {
+            out[kept++] = found[i];
+        }
+    }
+    return as_hid_dedupe(out, kept);
 }
 
 int as_hid_open(struct as_hid *dev)

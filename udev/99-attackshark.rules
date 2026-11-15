@@ -1,19 +1,12 @@
-# Attack Shark devices: allow the logged-in user to talk to the vendor
-# configuration collections.  Installed by "make install".
+# Attack Shark peripherals: let the logged-in user talk to
+# the hidraw nodes. Written by "attackshark permissions install";
+# regenerating it is safe, local edits are overwritten.
+#
+# Rules match the vendor id, not a single product id, so a new
+# model of the same family works without a new rules file.
 
-# R85 HE (Royuan, VID 3151)
-SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3151", ATTRS{idProduct}=="5029", TAG+="uaccess", MODE="0660", GROUP="plugdev"
-SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3151", ATTRS{idProduct}=="502d", TAG+="uaccess", MODE="0660", GROUP="plugdev"
-SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3151", ATTRS{idProduct}=="4015", TAG+="uaccess", MODE="0660", GROUP="plugdev"
-SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3151", ATTRS{idProduct}=="5002", TAG+="uaccess", MODE="0660", GROUP="plugdev"
+# Royuan keyboards: R85 HE and relatives
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3151", TAG+="uaccess", MODE="0660"
 
-# R11 Ultra / other Compx mice (VID 3554)
-SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3554", ATTRS{idProduct}=="fb43", TAG+="uaccess", MODE="0660", GROUP="plugdev"
-SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3554", ATTRS{idProduct}=="fb44", TAG+="uaccess", MODE="0660", GROUP="plugdev"
-SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3554", ATTRS{idProduct}=="f5f6", TAG+="uaccess", MODE="0660", GROUP="plugdev"
-SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3554", ATTRS{idProduct}=="f517", TAG+="uaccess", MODE="0660", GROUP="plugdev"
-SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3554", ATTRS{idProduct}=="f515", TAG+="uaccess", MODE="0660", GROUP="plugdev"
-SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3554", ATTRS{idProduct}=="f50d", TAG+="uaccess", MODE="0660", GROUP="plugdev"
-SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3554", ATTRS{idProduct}=="f510", TAG+="uaccess", MODE="0660", GROUP="plugdev"
-SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3554", ATTRS{idProduct}=="f50e", TAG+="uaccess", MODE="0660", GROUP="plugdev"
-SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3554", ATTRS{idProduct}=="f516", TAG+="uaccess", MODE="0660", GROUP="plugdev"
+# Compx mice: R11 Ultra, X11 Ultra and relatives
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3554", TAG+="uaccess", MODE="0660"

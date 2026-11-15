@@ -8,6 +8,7 @@
 #include <assert.h>
 #include <errno.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 /* Attack Shark R11 Ultra over Bluetooth (VID 3554, PID f533). */
@@ -113,12 +114,137 @@ static void test_unrelated_node(void)
     printf("unrelated node ok\n");
 }
 
+/* A boot keyboard map, as published by the first interface of the R85 HE. */
+static const unsigned char boot_map[] = {
+    0x05, 0x01, 0x09, 0x06, 0xa1, 0x01, 0x05, 0x07, 0x19, 0xe0, 0x29, 0xe7,
+    0x95, 0x08, 0x75, 0x01, 0x81, 0x02, 0xc0,
+};
+
+static struct as_hid node(unsigned vid, unsigned pid, const char *path,
+                          const char *phys, int iface,
+                          const unsigned char *desc, size_t len)
+{
+    struct as_hid dev = make(vid, pid, 0, desc, len);
+
+    snprintf(dev.path, sizeof(dev.path), "%s", path);
+    snprintf(dev.phys, sizeof(dev.phys), "%s", phys);
+    dev.iface = iface;
+    return dev;
+}
+
+/* The R85 HE publishes three hidraw nodes: the boot keyboard, the consumer and
+ * system key collections and the vendor settings collection. They are one
+ * device, so the list must show one entry, and that entry has to be the node
+ * with the settings collection. This was the source of three "R85 HE" rows. */
+static void test_dedupe_composite_keyboard(void)
+{
+    struct as_hid nodes[3];
+    int n;
+
+    nodes[0] = node(0x3151, 0x5029, "/dev/hidraw2",
+                    "usb-0000:00:14.0-6/input0", 0, boot_map,
+                    sizeof(boot_map));
+    nodes[1] = node(0x3151, 0x5029, "/dev/hidraw3",
+                    "usb-0000:00:14.0-6/input1", 1, boot_map,
+                    sizeof(boot_map));
+    nodes[2] = node(0x3151, 0x5029, "/dev/hidraw4",
+                    "usb-0000:00:14.0-6/input2", 2, keyboard_map,
+                    sizeof(keyboard_map));
+
+    n = as_hid_dedupe(nodes, 3);
+    assert(n == 1);
+    assert(strcmp(nodes[0].path, "/dev/hidraw4") == 0);
+    assert(nodes[0].iface == 2);
+    assert(as_hid_has_vendor(&nodes[0]));
+    printf("composite keyboard dedupe ok\n");
+}
+
+/* Two keyboards on two cables are two devices, even with equal ids. */
+static void test_dedupe_separate_devices(void)
+{
+    struct as_hid nodes[2];
+
+    nodes[0] = node(0x3151, 0x5029, "/dev/hidraw2",
+                    "usb-0000:00:14.0-6/input2", 2, keyboard_map,
+                    sizeof(keyboard_map));
+    nodes[1] = node(0x3151, 0x5029, "/dev/hidraw5",
+                    "usb-0000:00:14.0-7/input2", 2, keyboard_map,
+                    sizeof(keyboard_map));
+
+    assert(as_hid_dedupe(nodes, 2) == 2);
+    /* Sorted by path, so "list" does not depend on readdir order. */
+    assert(strcmp(nodes[0].path, "/dev/hidraw2") == 0);
+    assert(strcmp(nodes[1].path, "/dev/hidraw5") == 0);
+    printf("separate devices ok\n");
+}
+
+/* Without HID_PHYS nothing is merged on a guess. */
+static void test_dedupe_without_phys(void)
+{
+    struct as_hid nodes[2];
+
+    nodes[0] = node(0x3151, 0x5029, "/dev/hidraw2", "", 0, boot_map,
+                    sizeof(boot_map));
+    nodes[1] = node(0x3151, 0x5029, "/dev/hidraw3", "", 1, boot_map,
+                    sizeof(boot_map));
+
+    assert(as_hid_dedupe(nodes, 2) == 2);
+    printf("no phys no merge ok\n");
+}
+
+/* The driver writes the rules file itself, so it has to be complete: both
+ * families, the hidraw subsystem and a vendor-wide match. */
+static void test_udev_rule_text(void)
+{
+    char *text = as_udev_rule_text();
+
+    assert(text != NULL);
+    assert(strstr(text, "SUBSYSTEM==\"hidraw\"") != NULL);
+    assert(strstr(text, "ATTRS{idVendor}==\"3151\"") != NULL);
+    assert(strstr(text, "ATTRS{idVendor}==\"3554\"") != NULL);
+    assert(strstr(text, "TAG+=\"uaccess\"") != NULL);
+    /* Vendor-wide: a new product id of the same family keeps working. */
+    assert(strstr(text, "idProduct") == NULL);
+    assert(strcmp(as_udev_rule_path(),
+                  "/etc/udev/rules.d/99-attackshark.rules") == 0);
+    free(text);
+    printf("udev rule text ok\n");
+}
+
+/* The file shipped for "make install" must stay byte-identical to what the
+ * driver writes itself, otherwise packaging and the built-in installer would
+ * drift apart. Skipped when the test is run outside the source tree. */
+static void test_udev_rule_file(void)
+{
+    char file[4096];
+    char *text = as_udev_rule_text();
+    size_t n;
+    FILE *f = fopen("udev/99-attackshark.rules", "rb");
+
+    if (!f) {
+        printf("udev rule file not found, skipped\n");
+        free(text);
+        return;
+    }
+    n = fread(file, 1, sizeof(file) - 1, f);
+    fclose(f);
+    file[n] = 0;
+    assert(strcmp(file, text) == 0);
+    free(text);
+    printf("udev rule file matches the driver output\n");
+}
+
 int main(void)
 {
     test_bluetooth_link();
     test_dongle_link();
     test_keyboard_link();
     test_unrelated_node();
+    test_dedupe_composite_keyboard();
+    test_dedupe_separate_devices();
+    test_dedupe_without_phys();
+    test_udev_rule_text();
+    test_udev_rule_file();
     printf("all tests passed\n");
     return 0;
 }

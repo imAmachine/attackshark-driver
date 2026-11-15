@@ -49,6 +49,24 @@ static void put_bit8(uint8_t *p)
     p[8] = (uint8_t)(0xff - (sum & 0xff));
 }
 
+int as_keyboard_find_bluetooth(struct as_hid *out)
+{
+    struct as_hid found[16];
+    int n = as_hid_find(NULL, 0, found, 16);
+
+    for (int i = 0; i < n; i++) {
+        if (!as_hid_is_keyboard(&found[i]) ||
+            !as_hid_is_bluetooth(&found[i])) {
+            continue;
+        }
+        if (out) {
+            *out = found[i];
+        }
+        return 1;
+    }
+    return 0;
+}
+
 int as_keyboard_open(struct as_keyboard *kb)
 {
     struct as_hid found[8];
@@ -60,7 +78,9 @@ int as_keyboard_open(struct as_keyboard *kb)
 
     n = as_hid_find(keyboard_probe, sizeof(keyboard_probe), found, 8);
     if (n <= 0) {
-        return -ENODEV;
+        /* A Bluetooth link publishes standard HID collections only: say so
+         * instead of pretending the keyboard is absent. */
+        return as_keyboard_find_bluetooth(NULL) ? -ENOTSUP : -ENODEV;
     }
     for (int i = 0; i < n; i++) {
         if (found[i].vid == 0x3151) {

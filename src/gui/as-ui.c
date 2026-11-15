@@ -189,12 +189,20 @@ void as_ui_color_set(GtkColorDialogButton *button, gboolean *guard,
     *guard = previous;
 }
 
+const char *as_ui_error(const AsDevice *dev)
+{
+    if (dev->permission_denied) {
+        return "Нет доступа к hidraw: нажмите «Исправить» в шапке окна";
+    }
+    return dev->error;
+}
+
 char *as_ui_mouse_summary(const AsDevice *dev)
 {
     GString *s = g_string_new(NULL);
 
     if (dev->error[0]) {
-        g_string_append(s, dev->error);
+        g_string_append(s, as_ui_error(dev));
         return g_string_free(s, FALSE);
     }
     g_string_append(s, dev->online ? "связь есть"
@@ -213,7 +221,7 @@ char *as_ui_keyboard_summary(const AsDevice *dev)
     GString *s = g_string_new(NULL);
 
     if (dev->error[0]) {
-        g_string_append(s, dev->error);
+        g_string_append(s, as_ui_error(dev));
         return g_string_free(s, FALSE);
     }
     if (dev->rate > 0) {

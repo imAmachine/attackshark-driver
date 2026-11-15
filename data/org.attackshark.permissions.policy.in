@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC
+ "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
+<!--
+  Lets the window install its udev rules with one click. pkexec matches an
+  action by the program path, so @BINDIR@ is substituted at install time.
+  Without this file pkexec still works, only with a generic prompt.
+-->
+<policyconfig>
+  <vendor>Attack Shark driver</vendor>
+  <action id="org.attackshark.permissions.install">
+    <description>Install the Attack Shark udev rules</description>
+    <message>Authentication is required to let this user open Attack Shark devices (hidraw)</message>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">@BINDIR@/attackshark-gui</annotate>
+    <annotate key="org.freedesktop.policykit.exec.allow_gui">true</annotate>
+  </action>
+</policyconfig>

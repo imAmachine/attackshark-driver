@@ -30,6 +30,9 @@ typedef struct {
     unsigned pid;
     int iface;
     char error[160];
+    /* The node exists but this user may not open it: installing the udev
+     * rules is the fix, so the window offers it instead of a dead end. */
+    int permission_denied;
 
     /* mouse */
     int online;
@@ -116,6 +119,12 @@ gboolean as_store_busy(AsStore *self);
 GPtrArray *as_store_devices(AsStore *self);
 AsDevice *as_store_lookup(AsStore *self, const char *path);
 guint as_store_count(AsStore *self);
+/* TRUE when at least one device is present but not readable by this user. */
+gboolean as_store_permissions_denied(AsStore *self);
+/* Installs the udev rules on the worker thread and rescans afterwards. Only
+ * works when the process may write /etc/udev/rules.d (root); otherwise the
+ * window runs its own helper through pkexec. */
+void as_store_fix_permissions(AsStore *self);
 
 /* Queues a write. Returns FALSE when the device is unknown. */
 gboolean as_store_apply(AsStore *self, const char *path, const AsOpRequest *req);

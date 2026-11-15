@@ -15,6 +15,10 @@
 
 struct as_hid {
     char path[64];
+    /* HID_PHYS of the node, for example "usb-0000:00:14.0-6/input2" or a
+     * Bluetooth address. All interfaces of one physical device share the part
+     * before "/input", which is what ties a composite device together. */
+    char phys[96];
     unsigned bus;
     unsigned vid;
     unsigned pid;
@@ -29,6 +33,20 @@ struct as_hid {
  * sequence. Returns the number of matches written to out (max max). */
 int as_hid_find(const unsigned char *probe, size_t probe_len,
                 struct as_hid *out, int max);
+
+/* Collapses the hidraw nodes of one composite device into one entry.
+ * A keyboard such as the R85 HE is a composite USB device: the firmware
+ * publishes the boot keyboard, the consumer/system keys and the vendor
+ * settings collection as three interfaces, so /sys/class/hidraw holds three
+ * nodes with the same vendor and product id. Only one of them can carry
+ * settings, so the node with the vendor collection wins and the others are
+ * dropped. Entries are sorted by path, so listings stay stable. Returns the
+ * number of entries left in nodes. */
+int as_hid_dedupe(struct as_hid *nodes, int count);
+
+/* Every supported Attack Shark device, one entry per physical device.
+ * Returns the number of entries written to out (max max). */
+int as_hid_list_devices(struct as_hid *out, int max);
 
 /* Transport and family of a hidraw node, shared by the CLI and the GUI. */
 int as_hid_is_bluetooth(const struct as_hid *dev);
@@ -246,6 +264,10 @@ struct as_kb_state {
 
 int as_keyboard_open(struct as_keyboard *kb);
 void as_keyboard_close(struct as_keyboard *kb);
+/* Fills out with a Bluetooth link of the keyboard family, which carries no
+ * vendor collection. Returns 1 when such a link exists, so callers can say why
+ * settings are unavailable instead of reporting the keyboard as missing. */
+int as_keyboard_find_bluetooth(struct as_hid *out);
 
 /* Send a command and return the 64-byte answer in out (may be NULL). */
 int as_keyboard_cmd(struct as_keyboard *kb, uint8_t cmd, const uint8_t *args,
@@ -289,6 +311,23 @@ int as_kb_rate_from_code(int code);
 uint8_t as_kb_mm_to_raw(double mm);
 double as_kb_raw_to_mm(uint8_t raw);
 uint8_t as_kb_deadzone_to_raw(double mm);
+
+/* ---------- udev / permissions ---------- */
+
+/* Where the driver installs its own rules file; nothing has to be copied by
+ * hand. */
+const char *as_udev_rule_path(void);
+/* Body of the rules file. Matches whole vendor families instead of single
+ * product ids, so a new model of the same family works without a new file. */
+char *as_udev_rule_text(void);
+/* 1 when an Attack Shark rules file is present in any udev rules directory. */
+int as_udev_rules_installed(void);
+/* Writes the rules file (needs root), then reloads and re-triggers udev so the
+ * nodes that are already plugged in gain their ACLs without a replug. Returns
+ * 0 on success, a negative errno otherwise with a description in err. */
+int as_udev_install(char *err, size_t errlen);
+/* 1 when this process may install the rules itself (running as root). */
+int as_udev_can_install(void);
 
 /* ---------- misc ---------- */
 const char *as_strerror(int err);

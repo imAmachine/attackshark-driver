@@ -156,7 +156,7 @@ static void update_page(AsMousePage *p)
     p->updating = TRUE;
 
     if (dev->error[0]) {
-        adw_banner_set_title(p->banner, dev->error);
+        adw_banner_set_title(p->banner, as_ui_error(dev));
         adw_banner_set_revealed(p->banner, TRUE);
     } else if (!dev->online) {
         adw_banner_set_title(
