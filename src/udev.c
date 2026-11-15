@@ -129,9 +129,6 @@ static int is_rules_file(const char *dir, const char *name)
     if (strcmp(name, LEGACY_RULE_FILE) == 0) {
         return 0;
     }
-    if (strstr(name, RULE_MARKER)) {
-        return 1;
-    }
     snprintf(path, sizeof(path), "%s/%s", dir, name);
     f = fopen(path, "r");
     if (!f) {
@@ -140,7 +137,10 @@ static int is_rules_file(const char *dir, const char *name)
     n = fread(buf, 1, sizeof(buf) - 1, f);
     fclose(f);
     buf[n] = 0;
-    return strstr(buf, RULE_MARKER) != NULL;
+    return strstr(buf, "SUBSYSTEM=\"hidraw\"") != NULL &&
+           strstr(buf, "ATTRS{id/vendor}==\"3151\"") != NULL &&
+           strstr(buf, "ATTRS{id/vendor}==\"3554\"") != NULL &&
+           strstr(buf, RULE_MARKER) != NULL;
 }
 
 int as_udev_rules_installed(void)
