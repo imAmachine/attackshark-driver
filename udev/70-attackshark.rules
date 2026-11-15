@@ -1,0 +1,18 @@
+# Attack Shark peripherals: let the logged-in user talk to
+# the hidraw nodes. Written by "attackshark permissions install";
+# regenerating it is safe, local edits are overwritten.
+#
+# Rules match the vendor id, not a single product id, so a new
+# model of the same family works without a new rules file.
+#
+# The file name has to sort before 73-seat-late.rules: that rule
+# runs the uaccess builtin for the tags set by the files read so
+# far, so a file with a higher number grants no ACL at all. For the
+# same reason the rules run the builtin themselves, which keeps a
+# renamed copy working.
+
+# Royuan keyboards: R85 HE and relatives
+SUBSYSTEM=="hidraw", ATTRS{id/vendor}=="3151", TAG+="uaccess", MODE="0660", RUN{builtin}+="uaccess"
+
+# Compx mice: R11 Ultra, X11 Ultra and relatives
+SUBSYSTEM=="hidraw", ATTRS{id/vendor}=="3554", TAG+="uaccess", MODE="0660", RUN{builtin}+="uaccess"

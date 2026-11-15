@@ -200,15 +200,31 @@ static void test_udev_rule_text(void)
 
     assert(text != NULL);
     assert(strstr(text, "SUBSYSTEM==\"hidraw\"") != NULL);
-    assert(strstr(text, "ATTRS{idVendor}==\"3151\"") != NULL);
-    assert(strstr(text, "ATTRS{idVendor}==\"3554\"") != NULL);
+    /* id/vendor is the HID bus attribute, so the USB, the receiver and the
+     * Bluetooth link of a device are all covered by one rule. */
+    assert(strstr(text, "ATTRS{id/vendor}==\"3151\"") != NULL);
+    assert(strstr(text, "ATTRS{id/vendor}==\"3554\"") != NULL);
     assert(strstr(text, "TAG+=\"uaccess\"") != NULL);
+    assert(strstr(text, "RUN{builtin}+=\"uaccess\"") != NULL);
     /* Vendor-wide: a new product id of the same family keeps working. */
     assert(strstr(text, "idProduct") == NULL);
     assert(strcmp(as_udev_rule_path(),
-                  "/etc/udev/rules.d/99-attackshark.rules") == 0);
+                  "/etc/udev/rules.d/70-attackshark.rules") == 0);
     free(text);
     printf("udev rule text ok\n");
+}
+
+/* udev reads the rules in file name order and 73-seat-late.rules only runs
+ * the uaccess builtin for the tags set by the files before it. A higher
+ * number therefore installs a file that changes the node mode but grants no
+ * access: the node stays root-only and the fix looks like it did nothing. */
+static void test_udev_rule_order(void)
+{
+    const char *base = strrchr(as_udev_rule_path(), '/');
+
+    assert(base != NULL);
+    assert(strcmp(base + 1, "73-seat-late.rules") < 0);
+    printf("udev rules are read before the seat rules\n");
 }
 
 /* The file shipped for "make install" must stay byte-identical to what the
@@ -219,7 +235,7 @@ static void test_udev_rule_file(void)
     char file[4096];
     char *text = as_udev_rule_text();
     size_t n;
-    FILE *f = fopen("udev/99-attackshark.rules", "rb");
+    FILE *f = fopen("udev/70-attackshark.rules", "rb");
 
     if (!f) {
         printf("udev rule file not found, skipped\n");
@@ -244,6 +260,7 @@ int main(void)
     test_dedupe_separate_devices();
     test_dedupe_without_phys();
     test_udev_rule_text();
+    test_udev_rule_order();
     test_udev_rule_file();
     printf("all tests passed\n");
     return 0;

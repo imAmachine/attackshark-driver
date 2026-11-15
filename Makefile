@@ -61,7 +61,7 @@ src/gui/%.o: src/gui/%.c include/attackshark.h
 
 install: $(BIN)
 	install -Dm755 $(BIN) $(DESTDIR)$(BINDIR)/$(BIN)
-	install -Dm644 udev/99-attackshark.rules $(DESTDIR)$(UDEVDIR)/99-attackshark.rules
+	install -Dm644 udev/70-attackshark.rules $(DESTDIR)$(UDEVDIR)/70-attackshark.rules
 	install -Dm644 systemd/attackshark.service $(DESTDIR)$(SYSTEMDDIR)/attackshark.service
 
 install-gui: $(GUI)
@@ -77,7 +77,7 @@ install-gui: $(GUI)
 
 uninstall:
 	rm -f $(DESTDIR)$(BINDIR)/$(BIN)
-	rm -f $(DESTDIR)$(UDEVDIR)/99-attackshark.rules
+	rm -f $(DESTDIR)$(UDEVDIR)/70-attackshark.rules
 	rm -f $(DESTDIR)$(SYSTEMDDIR)/attackshark.service
 	rm -f $(DESTDIR)$(BINDIR)/$(GUI)
 	rm -f $(DESTDIR)$(DESKTOPDIR)/attackshark-gui.desktop

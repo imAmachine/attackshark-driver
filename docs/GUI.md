@@ -22,7 +22,7 @@ make install-gui     # /usr/local/bin + .desktop + иконка
   сверху появляется баннер «Нет доступа к устройствам: нужны правила udev»
   с кнопкой «Исправить». Кнопка запускает `attackshark-gui --udev-install`
   через `pkexec`; тот же бинарник в этом режиме пишет
-  `/etc/udev/rules.d/99-attackshark.rules` и делает
+  `/etc/udev/rules.d/70-attackshark.rules` и делает
   `udevadm control --reload-rules` + `udevadm trigger --subsystem-match=hidraw`,
   поэтому уже подключённые устройства получают доступ без переподключения.
   Если окно запущено от root, установка идёт сразу, без кнопки;

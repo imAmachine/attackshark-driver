@@ -12,6 +12,18 @@
  * The rules match the vendor id rather than single product ids: a new model of
  * the same family, or a firmware update that renumbers the product id, keeps
  * working without a new rules file.
+ *
+ * Two details make the difference between a rules file that works and one that
+ * only looks installed:
+ *
+ * - The file has to be read before "73-seat-late.rules". That rule runs the
+ *   uaccess builtin for the tags set so far, so a file that sets the tag later
+ *   (the driver used to be called "99-attackshark.rules") changes the mode of
+ *   the node but no ACL is ever granted: the node stays root-only. The rules
+ *   also ask for the builtin themselves, so a renamed copy keeps working.
+ * - ATTRS{id/vendor} is the HID bus attribute, present on the parent of every
+ *   hidraw node, so it matches the USB cable, the 2.4 GHz receiver and the
+ *   Bluetooth link of the same device. ATTRS{idVendor} only matches USB.
  */
 #define _GNU_SOURCE
 #include "internal.h"
@@ -29,9 +41,14 @@
 
 extern char **environ;
 
-#define RULE_FILE "99-attackshark.rules"
+/* Numbered before 73-seat-late.rules: see the comment at the top of the file. */
+#define RULE_FILE "70-attackshark.rules"
+/* The name the driver used before the ordering bug was fixed. It is still
+ * recognised so an upgrade replaces it instead of reporting it as installed. */
+#define LEGACY_RULE_FILE "99-attackshark.rules"
 #define RULE_DIR "/etc/udev/rules.d"
 #define RULE_PATH RULE_DIR "/" RULE_FILE
+#define LEGACY_RULE_PATH RULE_DIR "/" LEGACY_RULE_FILE
 /* Present in the file name and in the header comment, so a renamed copy of
  * the rules file is still recognised. */
 #define RULE_MARKER "attackshark"
@@ -65,7 +82,13 @@ char *as_udev_rule_text(void)
         "# regenerating it is safe, local edits are overwritten.\n"
         "#\n"
         "# Rules match the vendor id, not a single product id, so a new\n"
-        "# model of the same family works without a new rules file.\n";
+        "# model of the same family works without a new rules file.\n"
+        "#\n"
+        "# The file name has to sort before 73-seat-late.rules: that rule\n"
+        "# runs the uaccess builtin for the tags set by the files read so\n"
+        "# far, so a file with a higher number grants no ACL at all. For the\n"
+        "# same reason the rules run the builtin themselves, which keeps a\n"
+        "# renamed copy working.\n";
     char *text = NULL;
     size_t len = 0;
     FILE *f = open_memstream(&text, &len);
@@ -75,9 +98,12 @@ char *as_udev_rule_text(void)
     }
     fputs(header, f);
     for (size_t i = 0; i < AS_N(families); i++) {
+        /* id/vendor is the HID bus attribute: USB, 2.4 GHz and Bluetooth
+         * links of the same vendor all carry it on the parent of the node. */
         fprintf(f, "\n# %s\n"
-                   "SUBSYSTEM==\"hidraw\", ATTRS{idVendor}==\"%s\", "
-                   "TAG+=\"uaccess\", MODE=\"0660\"\n",
+                   "SUBSYSTEM==\"hidraw\", ATTRS{id/vendor}==\"%s\", "
+                   "TAG+=\"uaccess\", MODE=\"0660\", "
+                   "RUN{builtin}+=\"uaccess\"\n",
                 families[i].comment, families[i].vid);
     }
     if (fclose(f) != 0) {
@@ -88,7 +114,9 @@ char *as_udev_rule_text(void)
 }
 
 /* The rules file has to be recognised even when it was renamed by the
- * distribution, so the name and the content are both checked. */
+ * distribution, so the name and the content are both checked. The 99-prefixed
+ * file is ours too, but it grants nothing, so it does not count as installed:
+ * that keeps "permissions status" honest and makes the fix run again. */
 static int is_rules_file(const char *dir, const char *name)
 {
     char buf[4096], path[512];
@@ -96,6 +124,9 @@ static int is_rules_file(const char *dir, const char *name)
     FILE *f;
 
     if (len <= 6 || strcmp(name + len - 6, ".rules") != 0) {
+        return 0;
+    }
+    if (strcmp(name, LEGACY_RULE_FILE) == 0) {
         return 0;
     }
     if (strstr(name, RULE_MARKER)) {
@@ -226,6 +257,10 @@ int as_udev_install(char *err, size_t errlen)
     if (rc < 0) {
         return rc;
     }
+    /* An older install may still carry the 99-prefixed file. It changes the
+     * mode of the node but grants no access, so drop it before the reload
+     * instead of leaving a misleading second copy behind. */
+    (void)unlink(LEGACY_RULE_PATH);
 
     /* udev only applies the tags to nodes that appear after the rule is
      * loaded, so reload and re-trigger the hidraw subsystem: a keyboard that
