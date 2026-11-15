@@ -1159,10 +1159,24 @@ static int cmd_apply(const char *file)
         char *argv[16], *save = NULL, *tok;
         int argc = 0;
 
+        if (!strchr(line, '\n') && !feof(f)) {
+            int ch;
+
+            fprintf(stderr, "attackshark: configuration line is too long\n");
+            ret = 1;
+            while ((ch = fgetc(f)) != '\n' && ch != EOF) {
+            }
+            continue;
+        }
         line[strcspn(line, "#\n")] = 0;
         for (tok = strtok_r(line, " \t\r\n", &save); tok && argc < 16;
              tok = strtok_r(NULL, " \t\r\n", &save)) {
             argv[argc++] = tok;
+        }
+        if (tok) {
+            fprintf(stderr, "attackshark: configuration line has too many arguments\n");
+            ret = 1;
+            continue;
         }
         if (argc == 0) {
             continue;
