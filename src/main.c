@@ -35,6 +35,21 @@ static const char *jbool(int value)
     return value ? "true" : "false";
 }
 
+/* Key names contain a backslash, which JSON would swallow. */
+static const char *json_escape(const char *in, char *buf, size_t len)
+{
+    size_t o = 0;
+
+    for (; *in && o + 2 < len; in++) {
+        if (*in == '\\' || *in == '"') {
+            buf[o++] = '\\';
+        }
+        buf[o++] = *in;
+    }
+    buf[o] = 0;
+    return buf;
+}
+
 static int parse_bool(const char *s, int *value)
 {
     if (!s) {
@@ -1164,7 +1179,7 @@ static int cmd_keyboard(int argc, char **argv)
         int32_t pair[AS_KB_KEY_MAX];
         uint8_t uopt[AS_KB_KEY_MAX] = { 0 }, upair[AS_KB_KEY_MAX] = { 0 };
         uint32_t codes[AS_KB_KEY_MAX];
-        int have_matrix;
+        int have_matrix, first = 1;
 
         ret = read_key_tables(&kb, act, rel, rtp, rtr, dz, opt, pair);
         if (ret < 0) {
@@ -1173,6 +1188,9 @@ static int cmd_keyboard(int argc, char **argv)
             return 1;
         }
         have_matrix = as_keyboard_get_keymatrix(&kb, codes) == 0;
+        if (json_mode) {
+            printf("{\"keys\":[");
+        }
         for (int i = 0; i < AS_KB_KEY_MAX; i++) {
             char name[32];
             int mode;
@@ -1190,6 +1208,29 @@ static int cmd_keyboard(int argc, char **argv)
                            ? (uint8_t)pair[i]
                            : 0;
             mode = as_kb_snap_mode_of(uopt, upair, i);
+            if (json_mode) {
+                char escaped[128];
+
+                printf("%s{\"index\":%d,\"name\":\"%s\",\"actuation\":%.2f,"
+                       "\"release\":%.2f,\"deadzone\":%.2f,\"rt_press\":%.2f,"
+                       "\"rt_release\":%.2f,\"rapid_trigger\":%s,"
+                       "\"snap_mode\":\"%s\",\"snap_partner\":",
+                       first ? "" : ",", i,
+                       json_escape(name, escaped, sizeof(escaped)),
+                       as_kb_value_to_mm(&kb, AS_K_MAG_ACTUATION, act[i]),
+                       as_kb_value_to_mm(&kb, AS_K_MAG_RELEASE, rel[i]),
+                       as_kb_value_to_mm(&kb, AS_K_MAG_DEADZONE, dz[i]),
+                       as_kb_value_to_mm(&kb, AS_K_MAG_RT_PRESS, rtp[i]),
+                       as_kb_value_to_mm(&kb, AS_K_MAG_RT_RELEASE, rtr[i]),
+                       jbool(opt[i] & AS_KB_OPTION_RT), snap_mode_name(mode));
+                if (mode >= 0) {
+                    printf("%d}", pair[i]);
+                } else {
+                    printf("null}");
+                }
+                first = 0;
+                continue;
+            }
             printf("%3d  %-10s act %.2f  rel %.2f  rt %-3s  %s", i, name,
                    as_kb_value_to_mm(&kb, AS_K_MAG_ACTUATION, act[i]),
                    as_kb_value_to_mm(&kb, AS_K_MAG_RELEASE, rel[i]),
@@ -1199,6 +1240,9 @@ static int cmd_keyboard(int argc, char **argv)
                 printf(" with %d", pair[i]);
             }
             printf("\n");
+        }
+        if (json_mode) {
+            printf("]}\n");
         }
     } else if (!strcmp(sub, "key")) {
         int32_t act[AS_KB_KEY_MAX], rel[AS_KB_KEY_MAX], rtp[AS_KB_KEY_MAX];
@@ -1246,7 +1290,24 @@ static int cmd_keyboard(int argc, char **argv)
             upair[key] = pair[key] >= 0 && pair[key] < AS_KB_KEY_MAX
                              ? (uint8_t)pair[key]
                              : 0;
-            print_key_travel(&kb, key, act, rel, rtp, rtr, dz, uopt, upair);
+            if (json_mode) {
+                int mode = as_kb_snap_mode_of(uopt, upair, key);
+
+                printf("{\"index\":%d,\"actuation\":%.2f,\"release\":%.2f,"
+                       "\"deadzone\":%.2f,\"rt_press\":%.2f,"
+                       "\"rt_release\":%.2f,\"rapid_trigger\":%s,"
+                       "\"snap_mode\":\"%s\",\"snap_partner\":",
+                       key, act_mm, rel_mm, deadzone, rt_press, rt_release,
+                       jbool(rt), snap_mode_name(mode));
+                if (mode >= 0) {
+                    printf("%d}\n", pair[key]);
+                } else {
+                    printf("null}\n");
+                }
+            } else {
+                print_key_travel(&kb, key, act, rel, rtp, rtr, dz, uopt,
+                                 upair);
+            }
             as_keyboard_close(&kb);
             return 0;
         }
@@ -1290,7 +1351,9 @@ static int cmd_keyboard(int argc, char **argv)
             ret = as_keyboard_clear_snap(&kb, key1);
             if (ret < 0) {
                 report(ret);
-            } else if (!json_mode) {
+            } else if (json_mode) {
+                printf("{\"key\":%d,\"snap\":false}\n", key1);
+            } else {
                 printf("snap tap removed from key %d\n", key1);
             }
         } else {
@@ -1314,7 +1377,12 @@ static int cmd_keyboard(int argc, char **argv)
                                        opt_flag(argc, argv, "--full-bottom"));
             if (ret < 0) {
                 report(ret);
-            } else if (!json_mode) {
+            } else if (json_mode) {
+                printf("{\"key1\":%d,\"key2\":%d,\"mode\":\"%s\","
+                       "\"full_bottom\":%s}\n", key1, key2,
+                       snap_mode_name(mode),
+                       jbool(opt_flag(argc, argv, "--full-bottom")));
+            } else {
                 printf("snap tap: keys %d and %d, %s\n", key1, key2,
                        snap_mode_name(mode));
             }
