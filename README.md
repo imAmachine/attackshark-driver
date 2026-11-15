@@ -66,6 +66,12 @@ info` и `upower -d` (сервис Battery `0x180f`).
 - `travel` — ход срабатывания, отпускания, Rapid Trigger, deadzone для всех
   клавиш (без аргументов показывает текущие значения). Шаг значений драйвер
   определяет сам по версии прошивки: 0.1, 0.01 или 0.005 мм;
+- `keys` — таблица всех клавиш: имя, ход, Rapid Trigger и пара Snap Tap;
+- `key KEY` — те же параметры для одной клавиши, остальные не меняются;
+- `snap KEY1 KEY2 [last|neutral|first|second]` — Snap Tap для пары клавиш,
+  `snap off KEY` снимает пару. Устройство само решает, какая из двух клавиш
+  остаётся нажатой, пока удерживаются обе: последнее нажатие, нейтрально,
+  первая или вторая клавиша;
 - `multi` — сырая таблица магнитов по параметру;
 - `stream` — живой мониторинг хода клавиш (аналоговый поток);
 - `reset` — сброс к заводским настройкам.
@@ -143,6 +149,10 @@ attackshark mouse light --mode 1 --color ff0000 --brightness 6 --speed 3
 attackshark keyboard rate 8000
 attackshark keyboard light --mode wave --brightness 3 --speed 2 --color 00a0ff
 attackshark keyboard travel --actuation 1.5 --rt --rt-press 0.2 --deadzone 0.2
+attackshark keyboard keys                 # что сейчас задано на каждой клавише
+attackshark keyboard key 9 --actuation 2.0 --release 2.0 --deadzone 0.3
+attackshark keyboard snap 9 21 last       # Snap Tap: пара A и D
+attackshark keyboard snap off 9           # снять пару с клавиши A
 ```
 
 Полный список: `attackshark --help`. Проверка прав доступа и установка
@@ -153,9 +163,11 @@ attackshark keyboard travel --actuation 1.5 --rt --rt-press 0.2 --deadzone 0.2
 `attackshark-gui` — настройка тех же параметров мышкой, с живым состоянием
 устройства: список подключённых мышей и клавиатур, заряд и связь, частота
 опроса, DPI по этапам, LOD, debounce, motion sync/angle snap/ripple, а у
-клавиатуры — ещё и подсветка. Подсветка мыши в GUI не выводится: у части
-моделей (например, R11 Ultra) её физически нет, поэтому она остаётся
-командой `attackshark mouse light`.
+клавиатуры — ещё и подсветка. Ход клавиш задаётся для всех клавиш сразу или
+для одной выбранной из списка; рядом находится Snap Tap с выбором второй
+клавиши и приоритета. Подсветка мыши в GUI не выводится: у части моделей
+(например, R11 Ultra) её физически нет, поэтому она остаётся командой
+`attackshark mouse light`.
 
 ```sh
 make gui && ./attackshark-gui
