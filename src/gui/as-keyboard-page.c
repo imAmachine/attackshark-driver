@@ -33,6 +33,15 @@ typedef struct {
     AdwPreferencesGroup *light_group;
     int light_modes[16];
     int light_mode_count;
+    AdwSwitchRow *sw_side_light;
+    AdwComboRow *row_side_mode;
+    AdwSpinRow *row_side_bright;
+    AdwSpinRow *row_side_speed;
+    AdwSwitchRow *sw_side_dazzle;
+    GtkColorDialogButton *side_color;
+    AdwPreferencesGroup *side_light_group;
+    int side_modes[16];
+    int side_mode_count;
 } AsKeyboardPage;
 
 /* ---------------------------- write helpers ---------------------------- */
@@ -75,13 +84,13 @@ static void apply_mag_mode(AdwComboRow *row, GParamSpec *pspec, gpointer data)
     }
 }
 
-/* Turns the whole edge lighting off and restores the previous effect. */
-static void apply_light_power(AdwSwitchRow *row, GParamSpec *pspec,
+static void apply_zone_power(AdwSwitchRow *row, GParamSpec *pspec,
                               gpointer data)
 {
     AsKeyboardPage *p = data;
     AsDevice *dev;
-    AsOpRequest req = { .op = AS_OP_KB_SIDE_LIGHT };
+    int side = row == p->sw_side_light;
+    AsOpRequest req = { .op = side ? AS_OP_KB_SIDE_LIGHT : AS_OP_KB_LIGHT };
 
     (void)pspec;
     if (p->page.updating) {
@@ -91,34 +100,50 @@ static void apply_light_power(AdwSwitchRow *row, GParamSpec *pspec,
     if (!dev) {
         return;
     }
-    req.light_brightness = dev->side_light_brightness;
-    req.light_speed = dev->side_light_speed;
-    req.light_dazzle = dev->side_light_dazzle;
-    memcpy(req.rgb, dev->side_rgb, sizeof(req.rgb));
-    req.light_mode = adw_switch_row_get_active(row)
-                         ? (dev->side_light_mode_saved > 0
-                                ? dev->side_light_mode_saved
-                                : 4) /* wave */
-                         : 0;
+    if (side) {
+        req.light_brightness = dev->side_light_brightness;
+        req.light_speed = dev->side_light_speed;
+        req.light_dazzle = dev->side_light_dazzle;
+        memcpy(req.rgb, dev->side_rgb, sizeof(req.rgb));
+        req.light_mode = adw_switch_row_get_active(row)
+                             ? (dev->side_light_mode_saved > 0
+                                    ? dev->side_light_mode_saved
+                                    : 4)
+                             : 0;
+    } else {
+        req.light_brightness = dev->light_brightness;
+        req.light_speed = dev->light_speed;
+        req.light_dazzle = dev->light_dazzle;
+        memcpy(req.rgb, dev->light_rgb, sizeof(req.rgb));
+        req.light_mode = adw_switch_row_get_active(row) ?
+                         (dev->light_mode > 0 ? dev->light_mode : 1) : 0;
+    }
     as_store_apply(p->page.store, p->page.path, &req);
 }
 
-static void apply_light(AsKeyboardPage *p)
+static void apply_light(AsKeyboardPage *p, int side)
 {
     const GdkRGBA *rgba;
-    guint selected = adw_combo_row_get_selected(p->row_light_mode);
+    AdwComboRow *mode_row = side ? p->row_side_mode : p->row_light_mode;
+    AdwSpinRow *bright_row = side ? p->row_side_bright : p->row_bright;
+    AdwSpinRow *speed_row = side ? p->row_side_speed : p->row_speed;
+    AdwSwitchRow *dazzle_row = side ? p->sw_side_dazzle : p->sw_dazzle;
+    GtkColorDialogButton *color = side ? p->side_color : p->color;
+    int *modes = side ? p->side_modes : p->light_modes;
+    int mode_count = side ? p->side_mode_count : p->light_mode_count;
+    guint selected = adw_combo_row_get_selected(mode_row);
     AsOpRequest req = {
-        .op = AS_OP_KB_SIDE_LIGHT,
-        .light_brightness = (int)adw_spin_row_get_value(p->row_bright),
-        .light_speed = (int)adw_spin_row_get_value(p->row_speed),
-        .light_dazzle = adw_switch_row_get_active(p->sw_dazzle),
+        .op = side ? AS_OP_KB_SIDE_LIGHT : AS_OP_KB_LIGHT,
+        .light_brightness = (int)adw_spin_row_get_value(bright_row),
+        .light_speed = (int)adw_spin_row_get_value(speed_row),
+        .light_dazzle = adw_switch_row_get_active(dazzle_row),
     };
 
-    if (p->page.updating || selected >= (guint)p->light_mode_count) {
+    if (p->page.updating || selected >= (guint)mode_count) {
         return;
     }
-    req.light_mode = p->light_modes[selected];
-    rgba = gtk_color_dialog_button_get_rgba(p->color);
+    req.light_mode = modes[selected];
+    rgba = gtk_color_dialog_button_get_rgba(color);
     if (rgba) {
         as_ui_rgb_from_rgba(rgba, req.rgb);
     }
@@ -130,7 +155,15 @@ static void on_light_control(GtkWidget *widget, GParamSpec *pspec,
 {
     (void)widget;
     (void)pspec;
-    apply_light(data);
+    apply_light(data, 0);
+}
+
+static void on_side_light_control(GtkWidget *widget, GParamSpec *pspec,
+                                  gpointer data)
+{
+    (void)widget;
+    (void)pspec;
+    apply_light(data, 1);
 }
 
 /* ------------------------------ refreshing ----------------------------- */
@@ -139,6 +172,7 @@ static void update_page(AsKeyboardPage *p)
 {
     AsDevice *dev = as_page_device(&p->page);
     gboolean side_on = FALSE;
+    gboolean light_on = FALSE;
 
     if (!dev) {
         return;
@@ -170,24 +204,41 @@ static void update_page(AsKeyboardPage *p)
     as_ui_combo_set(p->row_rate_combo, &p->page.updating,
                     as_ui_rate_to_index(dev->rate));
 
-    gtk_widget_set_visible(GTK_WIDGET(p->light_group), dev->side_light_valid);
-    if (dev->side_light_valid) {
-        side_on = dev->side_light_mode != 0;
-        as_ui_switch_set(p->sw_light, &p->page.updating, side_on);
+    gtk_widget_set_visible(GTK_WIDGET(p->light_group), dev->light_valid);
+    if (dev->light_valid) {
+        light_on = dev->light_mode != 0;
+        as_ui_switch_set(p->sw_light, &p->page.updating, light_on);
         as_ui_combo_set(p->row_light_mode, &p->page.updating,
                         as_ui_light_index(p->light_modes, p->light_mode_count,
+                                          dev->light_mode));
+        as_ui_spin_set(p->row_bright, &p->page.updating, dev->light_brightness);
+        as_ui_spin_set(p->row_speed, &p->page.updating, dev->light_speed);
+        as_ui_switch_set(p->sw_dazzle, &p->page.updating, dev->light_dazzle);
+        as_ui_color_set(p->color, &p->page.updating, dev->light_rgb);
+        gtk_widget_set_sensitive(GTK_WIDGET(p->row_light_mode), light_on);
+        gtk_widget_set_sensitive(GTK_WIDGET(p->row_bright), light_on);
+        gtk_widget_set_sensitive(GTK_WIDGET(p->row_speed), light_on);
+        gtk_widget_set_sensitive(GTK_WIDGET(p->sw_dazzle), light_on);
+        gtk_widget_set_sensitive(GTK_WIDGET(p->color), light_on);
+    }
+    gtk_widget_set_visible(GTK_WIDGET(p->side_light_group), dev->side_light_valid);
+    if (dev->side_light_valid) {
+        side_on = dev->side_light_mode != 0;
+        as_ui_switch_set(p->sw_side_light, &p->page.updating, side_on);
+        as_ui_combo_set(p->row_side_mode, &p->page.updating,
+                        as_ui_light_index(p->side_modes, p->side_mode_count,
                                           dev->side_light_mode));
-        as_ui_spin_set(p->row_bright, &p->page.updating,
+        as_ui_spin_set(p->row_side_bright, &p->page.updating,
                        dev->side_light_brightness);
-        as_ui_spin_set(p->row_speed, &p->page.updating, dev->side_light_speed);
-        as_ui_switch_set(p->sw_dazzle, &p->page.updating,
+        as_ui_spin_set(p->row_side_speed, &p->page.updating, dev->side_light_speed);
+        as_ui_switch_set(p->sw_side_dazzle, &p->page.updating,
                          dev->side_light_dazzle);
-        as_ui_color_set(p->color, &p->page.updating, dev->side_rgb);
-        gtk_widget_set_sensitive(GTK_WIDGET(p->row_light_mode), side_on);
-        gtk_widget_set_sensitive(GTK_WIDGET(p->row_bright), side_on);
-        gtk_widget_set_sensitive(GTK_WIDGET(p->row_speed), side_on);
-        gtk_widget_set_sensitive(GTK_WIDGET(p->sw_dazzle), side_on);
-        gtk_widget_set_sensitive(GTK_WIDGET(p->color), side_on);
+        as_ui_color_set(p->side_color, &p->page.updating, dev->side_rgb);
+        gtk_widget_set_sensitive(GTK_WIDGET(p->row_side_mode), side_on);
+        gtk_widget_set_sensitive(GTK_WIDGET(p->row_side_bright), side_on);
+        gtk_widget_set_sensitive(GTK_WIDGET(p->row_side_speed), side_on);
+        gtk_widget_set_sensitive(GTK_WIDGET(p->sw_side_dazzle), side_on);
+        gtk_widget_set_sensitive(GTK_WIDGET(p->side_color), side_on);
     }
 
     p->page.updating = FALSE;
@@ -243,7 +294,7 @@ static AdwPreferencesGroup *build_settings(AsKeyboardPage *p)
     return group;
 }
 
-static GtkColorDialogButton *build_color(AsKeyboardPage *p)
+static GtkColorDialogButton *build_color(AsKeyboardPage *p, int side)
 {
     AdwActionRow *row = as_ui_value_row("Цвет");
     GtkColorDialog *dialog = gtk_color_dialog_new();
@@ -253,50 +304,44 @@ static GtkColorDialogButton *build_color(AsKeyboardPage *p)
     gtk_color_dialog_set_with_alpha(dialog, FALSE);
     button = GTK_COLOR_DIALOG_BUTTON(gtk_color_dialog_button_new(dialog));
     gtk_color_dialog_button_set_rgba(button, &rgba);
-    g_signal_connect(button, "notify::rgba", G_CALLBACK(on_light_control), p);
+    g_signal_connect(button, "notify::rgba",
+                     G_CALLBACK(side ? on_side_light_control : on_light_control), p);
     adw_action_row_add_suffix(ADW_ACTION_ROW(row), GTK_WIDGET(button));
-    adw_preferences_group_add(p->light_group, GTK_WIDGET(row));
+    adw_preferences_group_add(side ? p->side_light_group : p->light_group,
+                              GTK_WIDGET(row));
     return button;
 }
 
 static AdwPreferencesGroup *build_light(AsKeyboardPage *p)
 {
     AdwPreferencesGroup *group = as_ui_group(
-        "Подсветка", "Боковая подсветка корпуса. Галочка гасит её целиком, "
-                     "остальные настройки меняют эффект.");
+        "Подсветка клавиш", "Настройки подсветки клавиш.");
     GtkStringList *modes = as_ui_light_list_for(
-        1, p->light_modes, (int)G_N_ELEMENTS(p->light_modes));
+        0, p->light_modes, (int)G_N_ELEMENTS(p->light_modes));
 
     p->light_group = group;
     p->light_mode_count = (int)g_list_model_get_n_items(G_LIST_MODEL(modes));
-
     p->sw_light = as_ui_switch_row("Подсветка включена", NULL);
     g_signal_connect(p->sw_light, "notify::active",
-                     G_CALLBACK(apply_light_power), p);
+                     G_CALLBACK(apply_zone_power), p);
     adw_preferences_group_add(group, GTK_WIDGET(p->sw_light));
-
     p->row_light_mode = as_ui_combo("Режим", G_LIST_MODEL(modes));
     g_signal_connect(p->row_light_mode, "notify::selected",
                      G_CALLBACK(on_light_control), p);
     adw_preferences_group_add(group, GTK_WIDGET(p->row_light_mode));
-
     p->row_bright = as_ui_spin("Яркость", 0, 4, 1, NULL);
     g_signal_connect(p->row_bright, "notify::value",
                      G_CALLBACK(on_light_control), p);
     adw_preferences_group_add(group, GTK_WIDGET(p->row_bright));
-
     p->row_speed = as_ui_spin("Скорость", 0, 4, 1, NULL);
     g_signal_connect(p->row_speed, "notify::value",
                      G_CALLBACK(on_light_control), p);
     adw_preferences_group_add(group, GTK_WIDGET(p->row_speed));
-
-    p->color = build_color(p);
-
+    p->color = build_color(p, 0);
     p->sw_dazzle = as_ui_switch_row("Dazzle", NULL);
     g_signal_connect(p->sw_dazzle, "notify::active",
                      G_CALLBACK(on_light_control), p);
     adw_preferences_group_add(group, GTK_WIDGET(p->sw_dazzle));
-
     gtk_widget_set_visible(GTK_WIDGET(group), FALSE);
     return group;
 }
@@ -306,11 +351,42 @@ GtkWidget *as_keyboard_page_new(AsStore *store, const char *path)
     AsKeyboardPage *p = g_new0(AsKeyboardPage, 1);
     AdwPreferencesPage *prefs = ADW_PREFERENCES_PAGE(adw_preferences_page_new());
     GtkWidget *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+    GtkStringList *modes;
 
     as_page_attach(&p->page, box, prefs, store, path);
     adw_preferences_page_add(prefs, build_status(p));
     adw_preferences_page_add(prefs, build_settings(p));
     adw_preferences_page_add(prefs, build_light(p));
+
+    p->side_light_group = as_ui_group(
+        "Боковая подсветка", "Настройки подсветки боковой панели.");
+    modes = as_ui_light_list_for(1, p->side_modes,
+                                 (int)G_N_ELEMENTS(p->side_modes));
+    p->side_mode_count = (int)g_list_model_get_n_items(G_LIST_MODEL(modes));
+    p->sw_side_light = as_ui_switch_row("Подсветка включена", NULL);
+    g_signal_connect(p->sw_side_light, "notify::active",
+                     G_CALLBACK(apply_zone_power), p);
+    adw_preferences_group_add(p->side_light_group, GTK_WIDGET(p->sw_side_light));
+    p->row_side_mode = as_ui_combo("Режим", G_LIST_MODEL(modes));
+    g_signal_connect(p->row_side_mode, "notify::selected",
+                     G_CALLBACK(on_side_light_control), p);
+    adw_preferences_group_add(p->side_light_group, GTK_WIDGET(p->row_side_mode));
+    p->row_side_bright = as_ui_spin("Яркость", 0, 4, 1, NULL);
+    g_signal_connect(p->row_side_bright, "notify::value",
+                     G_CALLBACK(on_side_light_control), p);
+    adw_preferences_group_add(p->side_light_group, GTK_WIDGET(p->row_side_bright));
+    p->row_side_speed = as_ui_spin("Скорость", 0, 4, 1, NULL);
+    g_signal_connect(p->row_side_speed, "notify::value",
+                     G_CALLBACK(on_side_light_control), p);
+    adw_preferences_group_add(p->side_light_group, GTK_WIDGET(p->row_side_speed));
+    p->side_color = build_color(p, 1);
+    p->sw_side_dazzle = as_ui_switch_row("Dazzle", NULL);
+    g_signal_connect(p->sw_side_dazzle, "notify::active",
+                     G_CALLBACK(on_side_light_control), p);
+    adw_preferences_group_add(p->side_light_group, GTK_WIDGET(p->sw_side_dazzle));
+    gtk_widget_set_visible(GTK_WIDGET(p->side_light_group), FALSE);
+    adw_preferences_page_add(prefs, p->side_light_group);
+
     g_signal_connect_object(store, "changed", G_CALLBACK(on_store_changed),
                             box, 0);
     update_page(p);

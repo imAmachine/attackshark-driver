@@ -221,6 +221,17 @@ static void fill_keyboard(Handle *h, AsDevice *dev)
     dev->rate = st.report_rate;
     dev->debounce = st.debounce;
     dev->mag_mode = st.mag_mode;
+    if (st.light.valid) {
+        dev->light_valid = 1;
+        dev->light_on = st.light_on;
+        dev->light_mode = st.light.mode;
+        dev->light_speed = st.light.speed;
+        dev->light_brightness = st.light.brightness;
+        dev->light_dazzle = st.light.dazzle;
+        dev->light_rgb[0] = st.light.r;
+        dev->light_rgb[1] = st.light.g;
+        dev->light_rgb[2] = st.light.b;
+    }
     if (st.side_light.valid) {
         dev->side_light_valid = 1;
         if (st.side_light.mode != 0) {
@@ -513,6 +524,14 @@ static void apply_optimistic(AsDevice *dev, const AsOpRequest *req)
         break;
     case AS_OP_MOUSE_RIPPLE:
         dev->ripple = req->value;
+        break;
+    case AS_OP_KB_LIGHT:
+        dev->light_valid = 1;
+        dev->light_mode = req->light_mode;
+        dev->light_speed = req->light_speed;
+        dev->light_brightness = req->light_brightness;
+        dev->light_dazzle = req->light_dazzle;
+        memcpy(dev->light_rgb, req->rgb, sizeof(dev->light_rgb));
         break;
     case AS_OP_KB_SIDE_LIGHT:
         if (req->light_mode == 0) {

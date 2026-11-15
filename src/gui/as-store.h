@@ -61,6 +61,13 @@ typedef struct {
     int revision_valid;
     int revision;
     int mag_mode;
+    int light_valid;
+    int light_on;
+    int light_mode;
+    int light_speed;
+    int light_brightness;
+    int light_dazzle;
+    uint8_t light_rgb[3];
     int side_light_valid;
     int side_light_mode;
     int side_light_speed;
