@@ -9,6 +9,7 @@
 
 #include "as-ui.h"
 
+#include <cairo.h>
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
@@ -111,6 +112,12 @@ typedef struct {
     GtkWidget *status;
     AdwComboRow *switch_row;
     GtkWidget *group_buttons[4];
+    GtkWidget *demo_area;
+    AdwSwitchRow *demo_switch;
+    guint demo_timer;
+    double demo_depth;      /* how far the demo switch is pressed, mm */
+    double switch_bottom;   /* travel of the selected switch type, mm */
+    gboolean demo_held;
     guint32 signature;
     gboolean updating;
 } KeyDialog;
@@ -187,19 +194,19 @@ static gboolean refresh_later(gpointer data)
  * point; the bottom-out distance of the switch is listed only for reference,
  * because it belongs to the switch, not to the profile. */
 #define KEY_MAX_TRIGGER 2.0
-#define KEY_MIN_TRIGGER 0.01
 
 /* Switches the vendor lists for this family, with their bottom-out travel. */
 static const struct {
     const char *name;
-    const char *bottom_out;
+    const char *full_name;
+    double bottom_out;
 } switch_presets[] = {
-    { "Gateron Magnetic Jade", "3.4 мм" },
-    { "Gateron Magnetic Jade Pro", "3.4 мм" },
-    { "Gateron Magnetic Jade Gaming", "3.4 мм" },
-    { "Geon Raw HE", "3.4 мм" },
-    { "TTC King", "3.5 мм" },
-    { "Outemu Silent Ocean", "3.4 мм" },
+    { "Gateron Jade", "Gateron Magnetic Jade", 3.4 },
+    { "Jade Pro", "Gateron Magnetic Jade Pro", 3.4 },
+    { "Jade Gaming", "Gateron Magnetic Jade Gaming", 3.4 },
+    { "Geon Raw HE", "Geon Raw HE", 3.4 },
+    { "TTC King", "TTC King", 3.5 },
+    { "Outemu Silent", "Outemu Silent Ocean", 3.4 },
 };
 
 static const char *short_key_name(unsigned code, char *buf, size_t len)
@@ -459,6 +466,7 @@ static void on_switch_type(AdwComboRow *row, GParamSpec *pspec, gpointer data)
     }
     previous = d->updating;
     d->updating = TRUE;
+    d->switch_bottom = switch_presets[selected].bottom_out;
     as_ui_slider_set(d->actuation, 1.5);
     as_ui_slider_set(d->release, 1.5);
     as_ui_slider_set(d->rt_press, 0.2);
@@ -473,12 +481,14 @@ static void on_close(GtkButton *button, gpointer data)
     gtk_window_destroy(GTK_WINDOW(data));
 }
 
+static void on_slider_changed(gpointer data);
+
 static AdwActionRow *make_slider(AdwPreferencesGroup *group, const char *title,
                                  double min, double max, double *out,
                                  double value, KeyDialog *d)
 {
     AdwActionRow *row = as_ui_slider_row(title, min, max, 0.05, value, out,
-                                         NULL, d);
+                                         on_slider_changed, d);
 
     adw_preferences_group_add(group, GTK_WIDGET(row));
     return row;
@@ -522,6 +532,7 @@ static gboolean on_test_pressed(GtkEventControllerKey *controller,
     if (button) {
         gtk_widget_add_css_class(button, "pressed");
     }
+    d->demo_held = TRUE;
     return FALSE;
 }
 
@@ -538,6 +549,140 @@ static void on_test_released(GtkEventControllerKey *controller, guint keyval,
     (void)state;
     if (button) {
         gtk_widget_remove_css_class(button, "pressed");
+    }
+    d->demo_held = FALSE;
+}
+
+/* ---------------------------- switch demo ------------------------------ */
+
+/* The demo follows the held key and moves the cap through the same zones the
+ * saved settings describe, which is how the vendor's own travel view works.
+ * The depth is animated because the config channel does not stream travel. */
+static double demo_travel(const KeyDialog *d)
+{
+    return d->switch_bottom > 0.1 ? d->switch_bottom : 3.4;
+}
+
+static gboolean demo_tick(gpointer data)
+{
+    KeyDialog *d = data;
+    double travel = demo_travel(d);
+    double target = d->demo_held ? travel : 0.0;
+    double step = travel / 0.15 * 0.016;   /* full stroke in ~150 ms */
+
+    if (d->demo_depth < target) {
+        d->demo_depth = MIN(target, d->demo_depth + step);
+    } else if (d->demo_depth > target) {
+        d->demo_depth = MAX(target, d->demo_depth - step);
+    }
+    gtk_widget_queue_draw(d->demo_area);
+    return G_SOURCE_CONTINUE;
+}
+
+static void demo_draw(GtkDrawingArea *area, cairo_t *cr, int width, int height,
+                      gpointer data)
+{
+    KeyDialog *d = data;
+    double travel = demo_travel(d);
+    double top = 22.0, bottom = height - 22.0, span = bottom - top;
+    double act = MIN(d->act, travel), rel = MIN(d->rel, travel);
+    double y_act = top + act / travel * span;
+    double y_rel = top + rel / travel * span;
+    double y_now = top + MIN(d->demo_depth, travel) / travel * span;
+    double housing_x = 46.0, housing_w = 74.0;
+    char buf[96];
+
+    (void)area;
+    (void)width;
+    /* Travel scale and the zones the settings create. */
+    cairo_set_source_rgb(cr, 0.20, 0.20, 0.22);
+    cairo_rectangle(cr, housing_x, top - 8, housing_w, span + 16);
+    cairo_fill(cr);
+    cairo_set_source_rgba(cr, 0.16, 0.65, 0.40, 0.35);
+    cairo_rectangle(cr, housing_x, y_act, housing_w, bottom - y_act);
+    cairo_fill(cr);
+    cairo_set_source_rgba(cr, 0.95, 0.65, 0.10, 0.35);
+    cairo_rectangle(cr, housing_x, y_rel, housing_w,
+                    MAX(1.0, y_act - y_rel));
+    cairo_fill(cr);
+
+    /* Actuation and release lines. */
+    cairo_set_line_width(cr, 2.0);
+    cairo_set_source_rgb(cr, 0.20, 0.60, 1.0);
+    cairo_move_to(cr, housing_x - 10, y_act);
+    cairo_line_to(cr, housing_x + housing_w + 10, y_act);
+    cairo_stroke(cr);
+    cairo_set_source_rgb(cr, 0.20, 0.85, 0.45);
+    cairo_move_to(cr, housing_x - 10, y_rel);
+    cairo_line_to(cr, housing_x + housing_w + 10, y_rel);
+    cairo_stroke(cr);
+
+    /* The cap itself, at the depth reached so far. */
+    cairo_set_source_rgb(cr, 0.35, 0.38, 0.45);
+    cairo_rectangle(cr, housing_x + 4, y_now - 11, housing_w - 8, 22);
+    cairo_fill(cr);
+    cairo_set_source_rgb(cr, 0.85, 0.87, 0.92);
+    cairo_rectangle(cr, housing_x + 14, y_now - 5, housing_w - 28, 3);
+    cairo_fill(cr);
+
+    /* Readings: depth, the two trigger points and the current zone. */
+    cairo_set_source_rgb(cr, 0.95, 0.95, 0.95);
+    cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL,
+                           CAIRO_FONT_WEIGHT_BOLD);
+    cairo_set_font_size(cr, 14.0);
+    snprintf(buf, sizeof(buf), "%.2f мм из %.2f", d->demo_depth, travel);
+    cairo_move_to(cr, housing_x + housing_w + 24, top + 4);
+    cairo_show_text(cr, buf);
+
+    cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL,
+                           CAIRO_FONT_WEIGHT_NORMAL);
+    cairo_set_font_size(cr, 12.0);
+    snprintf(buf, sizeof(buf), "Срабатывание: %.2f мм", d->act);
+    cairo_set_source_rgb(cr, 0.55, 0.75, 1.0);
+    cairo_move_to(cr, housing_x + housing_w + 24, top + 30);
+    cairo_show_text(cr, buf);
+
+    snprintf(buf, sizeof(buf), "Отпускание: %.2f мм", d->rel);
+    cairo_set_source_rgb(cr, 0.55, 0.9, 0.65);
+    cairo_move_to(cr, housing_x + housing_w + 24, top + 50);
+    cairo_show_text(cr, buf);
+
+    if (d->demo_depth >= act) {
+        snprintf(buf, sizeof(buf), "зона: сработала");
+    } else if (d->demo_depth <= rel && d->demo_held == FALSE &&
+               d->demo_depth < act) {
+        snprintf(buf, sizeof(buf), "зона: отпущена");
+    } else {
+        snprintf(buf, sizeof(buf), "зона: ожидание");
+    }
+    cairo_set_source_rgb(cr, 0.95, 0.95, 0.95);
+    cairo_move_to(cr, housing_x + housing_w + 24, top + 70);
+    cairo_show_text(cr, buf);
+}
+
+static void on_slider_changed(gpointer data)
+{
+    KeyDialog *d = data;
+
+    gtk_widget_queue_draw(d->demo_area);
+}
+
+static void on_demo_toggle(AdwSwitchRow *row, GParamSpec *pspec, gpointer data)
+{
+    KeyDialog *d = data;
+    gboolean active = adw_switch_row_get_active(row);
+
+    (void)pspec;
+    gtk_widget_set_visible(d->demo_area, active);
+    if (active && !d->demo_timer) {
+        d->demo_timer = g_timeout_add(16, demo_tick, d);
+    }
+    if (!active && d->demo_timer) {
+        g_source_remove(d->demo_timer);
+        d->demo_timer = 0;
+        d->demo_held = FALSE;
+        d->demo_depth = 0.0;
+        gtk_widget_queue_draw(d->demo_area);
     }
 }
 
@@ -563,7 +708,12 @@ static GtkWidget *make_legend(void)
 
 static void dialog_free(gpointer data)
 {
-    g_free(data);
+    KeyDialog *d = data;
+
+    if (d->demo_timer) {
+        g_source_remove(d->demo_timer);
+    }
+    g_free(d);
 }
 
 static void load_css(void)
@@ -695,24 +845,29 @@ void as_key_dialog_open(GtkWindow *parent, AsStore *store, const char *path)
         GtkStringList *types = gtk_string_list_new(NULL);
 
         for (size_t i = 0; i < G_N_ELEMENTS(switch_presets); i++) {
-            char label[96];
+            char label[64];
 
-            snprintf(label, sizeof(label), "%s, ход %s",
+            snprintf(label, sizeof(label), "%s (%.1f мм)",
                      switch_presets[i].name, switch_presets[i].bottom_out);
             gtk_string_list_append(types, label);
         }
         d->switch_row = as_ui_combo("Тип свитчей", G_LIST_MODEL(types));
+        d->switch_bottom = switch_presets[0].bottom_out;
+        gtk_widget_set_tooltip_text(
+            GTK_WIDGET(d->switch_row),
+            "Ход свитча нужен только для демо-режима; прошивка хранит "
+            "один профиль на все клавиши");
         g_signal_connect(d->switch_row, "notify::selected",
                          G_CALLBACK(on_switch_type), d);
         adw_preferences_group_add(group, GTK_WIDGET(d->switch_row));
     }
-    d->actuation = make_slider(group, "Точка срабатывания", 0.1, 2.0,
+    d->actuation = make_slider(group, "Точка срабатывания", 0.0, 2.0,
                                &d->act, 1.5, d);
-    d->release = make_slider(group, "Точка отпускания", 0.1, 2.0, &d->rel, 1.5,
+    d->release = make_slider(group, "Точка отпускания", 0.0, 2.0, &d->rel, 1.5,
                              d);
-    d->rt_press = make_slider(group, "Rapid Trigger: нажатие", 0.1, 2.0,
+    d->rt_press = make_slider(group, "Rapid Trigger: нажатие", 0.0, 2.0,
                               &d->rtp, 0.2, d);
-    d->rt_release = make_slider(group, "Rapid Trigger: отпускание", 0.1, 2.0,
+    d->rt_release = make_slider(group, "Rapid Trigger: отпускание", 0.0, 2.0,
                                 &d->rtr, 0.2, d);
     d->deadzone = make_slider(group, "Мёртвая зона", 0.0, 1.0, &d->dz, 0.3, d);
     d->rt = as_ui_switch_row("Rapid Trigger", NULL);
@@ -721,6 +876,26 @@ void as_key_dialog_open(GtkWindow *parent, AsStore *store, const char *path)
                                 "как только ход уменьшился на заданное значение");
     adw_preferences_group_add(group, GTK_WIDGET(d->rt));
     gtk_box_append(GTK_BOX(outer), GTK_WIDGET(group));
+
+    {
+        AdwPreferencesGroup *demo = as_ui_group(
+            "Проверка нажатия",
+            "Включите демо-свич и нажмите клавишу на клавиатуре: ползунок "
+            "покажет, в какой зоне находится ход.");
+
+        d->demo_switch = as_ui_switch_row(
+            "Демо-свич", "Рисует ход выбранного типа свитча");
+        g_signal_connect(d->demo_switch, "notify::active",
+                         G_CALLBACK(on_demo_toggle), d);
+        adw_preferences_group_add(demo, GTK_WIDGET(d->demo_switch));
+        d->demo_area = gtk_drawing_area_new();
+        gtk_widget_set_size_request(d->demo_area, -1, 150);
+        gtk_widget_set_visible(d->demo_area, FALSE);
+        gtk_drawing_area_set_draw_func(GTK_DRAWING_AREA(d->demo_area),
+                                       demo_draw, d, NULL);
+        adw_preferences_group_add(demo, d->demo_area);
+        gtk_box_append(GTK_BOX(outer), GTK_WIDGET(demo));
+    }
 
     d->status = gtk_label_new("Выбрано клавиш: 0");
     gtk_label_set_xalign(GTK_LABEL(d->status), 0.0);
@@ -753,6 +928,10 @@ void as_key_dialog_open(GtkWindow *parent, AsStore *store, const char *path)
      * and again once the store has them, and follow later writes the same
      * way so the sliders never show stale numbers. */
     g_signal_connect(store, "changed", G_CALLBACK(on_store_changed), d);
+    d->updating = TRUE;
+    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(d->buttons[0]), TRUE);
+    d->updating = FALSE;
+    sync_selection(d);
     gtk_window_present(d->window);
     g_timeout_add(500, refresh_later, d);
 }

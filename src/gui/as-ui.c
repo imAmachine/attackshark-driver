@@ -331,6 +331,12 @@ AdwActionRow *as_ui_slider_row(const char *title, double min, double max,
     s->changed = changed;
     s->user_data = user_data;
     s->row = row;
+    {
+        char range[48];
+
+        g_snprintf(range, sizeof(range), "диапазон %.2f–%.2f мм", min, max);
+        adw_action_row_set_subtitle(row, range);
+    }
     if (value < min) {
         value = min;
     }
