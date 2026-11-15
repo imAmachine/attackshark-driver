@@ -427,15 +427,12 @@ int as_keyboard_get_light_power(struct as_keyboard *kb)
     if (ret < 0) {
         return ret;
     }
-    /* Both layouts the vendor software handles put the flag in byte 1 or 3;
-     * 1 means the backlight is in low-power (off) mode. Some firmwares just
-     * echo the request, so "all zeroes" is "unknown", not "on". */
-    return out[1] == 1 || out[3] == 1 ? 0 : -1;
+    return out[1] == 1 ? 1 : out[1] == 0 ? 0 : -1;
 }
 
 int as_keyboard_set_light_power(struct as_keyboard *kb, int on)
 {
-    uint8_t args[3] = { 0, 0, on ? 0 : 1 };
+    uint8_t args[3] = { on ? 1 : 0, 1, 0 };
 
     return as_keyboard_cmd(kb, AS_K_SET_LED_POWER, args, sizeof(args), 0, NULL,
                            0);
