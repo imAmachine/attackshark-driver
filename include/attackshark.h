@@ -10,8 +10,12 @@
 
 /* ---------- HID transport ---------- */
 
+/* Value of the bus field in the HID_ID line of the hidraw uevent. */
+#define AS_BUS_BLUETOOTH 0x0005
+
 struct as_hid {
     char path[64];
+    unsigned bus;
     unsigned vid;
     unsigned pid;
     int iface;
@@ -25,6 +29,14 @@ struct as_hid {
  * sequence. Returns the number of matches written to out (max max). */
 int as_hid_find(const unsigned char *probe, size_t probe_len,
                 struct as_hid *out, int max);
+
+/* Transport and family of a hidraw node, shared by the CLI and the GUI. */
+int as_hid_is_bluetooth(const struct as_hid *dev);
+int as_hid_is_mouse(const struct as_hid *dev);
+int as_hid_is_keyboard(const struct as_hid *dev);
+/* True when the node exposes the vendor configuration collection. Bluetooth
+ * HID links carry only standard HID collections, so they have no settings. */
+int as_hid_has_vendor(const struct as_hid *dev);
 
 int as_hid_open(struct as_hid *dev);
 void as_hid_close(struct as_hid *dev);
@@ -127,6 +139,11 @@ struct as_mouse_state {
 
 int as_mouse_open(struct as_mouse *m);
 void as_mouse_close(struct as_mouse *m);
+/* Fills out with a Bluetooth link of the mouse family, which the firmware
+ * exposes without the vendor collection. Returns 1 when such a link exists,
+ * so callers can explain why settings are unavailable instead of reporting
+ * the device as missing. */
+int as_mouse_find_bluetooth(struct as_hid *out);
 int as_mouse_handshake(struct as_mouse *m);
 int as_mouse_read_block(struct as_mouse *m, unsigned addr, uint8_t *buf, unsigned len);
 int as_mouse_write_block(struct as_mouse *m, unsigned addr, const uint8_t *buf, unsigned len);

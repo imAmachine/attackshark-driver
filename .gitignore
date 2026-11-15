@@ -3,6 +3,7 @@ attackshark
 attackshark-gui
 libattackshark.a
 tests/test_codec
+tests/test_detect
 tests/test_gui_store
 compile_commands.json
 ref/

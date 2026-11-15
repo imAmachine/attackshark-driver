@@ -141,6 +141,7 @@ int as_hid_find(const unsigned char *probe, size_t probe_len,
             if (strncmp(line, "HID_ID=", 7) == 0) {
                 unsigned bus = 0, vid = 0, pid = 0;
                 if (sscanf(line + 7, "%x:%x:%x", &bus, &vid, &pid) == 3) {
+                    dev.bus = bus;
                     dev.vid = vid;
                     dev.pid = pid;
                 }

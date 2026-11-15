@@ -82,8 +82,12 @@ uninstall:
 tests/test_codec: tests/test_codec.c $(LIB)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ tests/test_codec.c $(LIB) -lm
 
-test: tests/test_codec
+tests/test_detect: tests/test_detect.c $(LIB)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ tests/test_detect.c $(LIB) -lm
+
+test: tests/test_codec tests/test_detect
 	./tests/test_codec
+	./tests/test_detect
 
 tests/test_gui_store: $(STORE_TEST_SRC) $(LIB)
 	$(CC) $(CPPFLAGS) -Isrc/gui $(GUI_CFLAGS) $(CFLAGS) -o $@ $(STORE_TEST_SRC) \
@@ -100,7 +104,7 @@ check: test $(BIN)
 compiledb:
 	@printf '[\n' > compile_commands.json
 	@set -e; first=1; \
-	for f in $(LIB_SRC) $(BIN_SRC) $(GUI_SRC) $(STORE_TEST_SRC); do \
+	for f in $(LIB_SRC) $(BIN_SRC) $(GUI_SRC) $(STORE_TEST_SRC) tests/test_detect.c; do \
 		case $$f in src/gui/*) extra="$(GUI_CFLAGS)";; \
 			tests/*) extra="-Isrc/gui $(GUI_CFLAGS)";; *) extra="";; esac; \
 		[ $$first = 1 ] || printf ',\n' >> compile_commands.json; \
@@ -112,4 +116,4 @@ compiledb:
 
 clean:
 	rm -f $(LIB_OBJ) src/main.o src/gui/*.o tests/*.o $(LIB) $(BIN) $(GUI) \
-		tests/test_codec tests/test_gui_store
+		tests/test_codec tests/test_detect tests/test_gui_store

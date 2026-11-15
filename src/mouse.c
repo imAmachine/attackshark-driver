@@ -110,6 +110,24 @@ static int exchange(struct as_mouse *m, const uint8_t *pkt, uint8_t *reply,
     return -ETIMEDOUT;
 }
 
+int as_mouse_find_bluetooth(struct as_hid *out)
+{
+    struct as_hid found[16];
+    int n = as_hid_find(NULL, 0, found, 16);
+
+    for (int i = 0; i < n; i++) {
+        if (!as_hid_is_mouse(&found[i]) || !as_hid_is_bluetooth(&found[i]) ||
+            as_hid_has_vendor(&found[i])) {
+            continue;
+        }
+        if (out) {
+            *out = found[i];
+        }
+        return 1;
+    }
+    return 0;
+}
+
 int as_mouse_open(struct as_mouse *m)
 {
     struct as_hid found[8];
@@ -120,7 +138,7 @@ int as_mouse_open(struct as_mouse *m)
 
     n = as_hid_find(mouse_probe, sizeof(mouse_probe), found, 8);
     if (n <= 0) {
-        return -ENODEV;
+        return as_mouse_find_bluetooth(NULL) ? -ENOTSUP : -ENODEV;
     }
     /* Prefer the vendor interface on a Compx device. */
     for (int i = 0; i < n; i++) {

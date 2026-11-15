@@ -41,15 +41,15 @@ G_DEFINE_TYPE(AsStore, as_store, G_TYPE_OBJECT)
 
 /* --------------------------- classification --------------------------- */
 
-/* Same rule the CLI uses: the vendor HID collection inside the descriptor. */
+/* Same family rules the CLI uses. Bluetooth links carry no vendor collection:
+ * they are still listed so the window can explain why they cannot be
+ * configured instead of pretending the device is absent. */
 static int classify(const struct as_hid *hid)
 {
-    if (hid->vid == 0x3151 &&
-        memmem(hid->descriptor, hid->descriptor_len, "\x06\xff\xff\x09\x02", 5)) {
+    if (as_hid_is_keyboard(hid)) {
         return AS_DEVICE_KEYBOARD;
     }
-    if (hid->vid == 0x3554 &&
-        memmem(hid->descriptor, hid->descriptor_len, "\x06\x02\xff", 3)) {
+    if (as_hid_is_mouse(hid)) {
         return AS_DEVICE_MOUSE;
     }
     return -1;

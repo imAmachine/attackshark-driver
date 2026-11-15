@@ -87,6 +87,8 @@ static int cmd_list(void)
     struct as_hid found[16];
     int n = as_hid_find(NULL, 0, found, 16);
     int first = 1;
+    int bt_hint = 0;
+    int configurable_mouse = 0;
 
     if (json_mode) {
         printf("[");
@@ -94,29 +96,38 @@ static int cmd_list(void)
     for (int i = 0; i < n; i++) {
         const char *kind = NULL;
         const char *product = "unknown";
+        int bluetooth = as_hid_is_bluetooth(&found[i]);
+        int configurable;
 
-        if (found[i].vid == 0x3151 &&
-            memmem(found[i].descriptor, found[i].descriptor_len,
-                   "\x06\xff\xff\x09\x02", 5)) {
+        if (as_hid_is_keyboard(&found[i])) {
             kind = "keyboard";
             product = "R85 HE";
-        } else if (found[i].vid == 0x3554 &&
-                   memmem(found[i].descriptor, found[i].descriptor_len,
-                          "\x06\x02\xff", 3)) {
+        } else if (as_hid_is_mouse(&found[i])) {
             kind = "mouse";
             product = as_mouse_model_name(found[i].pid);
-        }
-        if (!kind) {
+        } else {
             continue;
         }
+        configurable = as_hid_has_vendor(&found[i]);
+        if (!configurable && bluetooth) {
+            bt_hint = 1;
+        }
+        if (configurable && !strcmp(kind, "mouse")) {
+            configurable_mouse = 1;
+        }
         if (json_mode) {
-            printf("%s{\"kind\":\"%s\",\"path\":\"%s\",\"vid\":%u,\"pid\":%u,"
-                   "\"interface\":%d,\"product\":\"%s\"}",
+            printf("%s{\"kind\":\"%s\",\"path\":\"%s\",\"vid\":%u,"
+                   "\"pid\":%u,\"interface\":%d,\"product\":\"%s\","
+                   "\"transport\":\"%s\",\"configurable\":%s}",
                    first ? "" : ",", kind, found[i].path, found[i].vid,
-                   found[i].pid, found[i].iface, product);
+                   found[i].pid, found[i].iface, product,
+                   bluetooth ? "bluetooth" : "usb",
+                   configurable ? "true" : "false");
         } else {
-            printf("%-8s %s  %04x:%04x  iface %d  %s\n", kind, found[i].path,
-                   found[i].vid, found[i].pid, found[i].iface, product);
+            printf("%-8s %s  %04x:%04x  iface %d  %-3s %s%s\n", kind,
+                   found[i].path, found[i].vid, found[i].pid, found[i].iface,
+                   bluetooth ? "bt" : "usb", product,
+                   configurable ? "" : "  (settings unavailable)");
         }
         first = 0;
     }
@@ -125,6 +136,11 @@ static int cmd_list(void)
     } else if (first) {
         printf("no supported Attack Shark device found\n");
         return 1;
+    } else if (bt_hint && !configurable_mouse) {
+        fprintf(stderr, "note: a Bluetooth link exposes only the standard "
+                        "HID collections;\n"
+                        "      DPI, polling rate and lighting need the "
+                        "2.4 GHz receiver or a cable.\n");
     }
     return 0;
 }
@@ -138,8 +154,19 @@ static int cmd_mouse(int argc, char **argv)
     const char *sub = argc > 0 ? argv[0] : "info";
     int ret;
 
-    if (as_mouse_open(&m) < 0) {
-        fprintf(stderr, "attackshark: mouse not found\n");
+    ret = as_mouse_open(&m);
+    if (ret < 0) {
+        struct as_hid bt;
+
+        if (ret == -ENOTSUP && as_mouse_find_bluetooth(&bt)) {
+            fprintf(stderr, "attackshark: %s at %s, but %s\n",
+                    as_mouse_model_name(bt.pid), bt.path, as_strerror(ret));
+        } else if (ret == -ENODEV) {
+            fprintf(stderr, "attackshark: mouse not found\n");
+        } else {
+            fprintf(stderr, "attackshark: %s\n", as_strerror(ret));
+        }
+        as_mouse_close(&m);
         return 1;
     }
 
