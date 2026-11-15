@@ -67,6 +67,16 @@ typedef struct {
     double rt_press;
     double rt_release;
     double deadzone;
+    /* Every matrix position, so the page can configure one key at a time. */
+    int key_code_valid;
+    uint32_t key_code[AS_KB_KEY_MAX];
+    uint8_t key_option[AS_KB_KEY_MAX];
+    uint8_t key_pair[AS_KB_KEY_MAX];
+    double key_actuation[AS_KB_KEY_MAX];
+    double key_release[AS_KB_KEY_MAX];
+    double key_rt_press[AS_KB_KEY_MAX];
+    double key_rt_release[AS_KB_KEY_MAX];
+    double key_deadzone[AS_KB_KEY_MAX];
     int light_valid;
     int light_on;
     int light_mode;
@@ -99,6 +109,8 @@ enum {
     AS_OP_KB_DEBOUNCE,
     AS_OP_KB_MAG_MODE,
     AS_OP_KB_TRAVEL,
+    AS_OP_KB_KEY_TRAVEL,
+    AS_OP_KB_SNAP,
     AS_OP_KB_LIGHT,
     AS_OP_KB_LIGHT_POWER,
     AS_OP_KB_SIDE_LIGHT,
@@ -121,6 +133,11 @@ typedef struct {
     double rt_release;
     double deadzone;
     int rapid_trigger;
+    /* AS_OP_KB_SNAP: index is the first key, value the second, snap_mode one
+     * of as_kb_snap_mode. snap_disable only clears the pair. */
+    int snap_mode;
+    int snap_full_bottom;
+    int snap_disable;
 } AsOpRequest;
 
 AsStore *as_store_get(void);

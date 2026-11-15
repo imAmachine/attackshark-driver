@@ -27,6 +27,11 @@ typedef struct {
     char path[64];
     struct as_mouse mouse;
     struct as_keyboard kb;
+    /* Key names rarely change, so the matrix is read once per profile
+     * instead of on every refresh. */
+    int matrix_valid;
+    int matrix_profile;
+    uint32_t key_code[AS_KB_KEY_MAX];
 } Handle;
 
 struct _AsStore {
@@ -222,20 +227,58 @@ static void fill_keyboard(Handle *h, AsDevice *dev)
     dev->debounce = st.debounce;
     dev->mag_mode = st.mag_mode;
     if (st.mag_mode >= 0) {
-        int32_t act[128], rel[128], rtp[128], rtr[128], dz[128], opt[128];
+        int32_t act[AS_KB_KEY_MAX], rel[AS_KB_KEY_MAX], rtp[AS_KB_KEY_MAX];
+        int32_t rtr[AS_KB_KEY_MAX], dz[AS_KB_KEY_MAX], opt[AS_KB_KEY_MAX];
+        int32_t pair[AS_KB_KEY_MAX];
 
-        if (as_keyboard_get_param(&h->kb, AS_K_MAG_ACTUATION, act, 128) == 0 &&
-            as_keyboard_get_param(&h->kb, AS_K_MAG_RELEASE, rel, 128) == 0 &&
-            as_keyboard_get_param(&h->kb, AS_K_MAG_RT_PRESS, rtp, 128) == 0 &&
-            as_keyboard_get_param(&h->kb, AS_K_MAG_RT_RELEASE, rtr, 128) == 0 &&
-            as_keyboard_get_param(&h->kb, AS_K_MAG_DEADZONE, dz, 128) == 0 &&
-            as_keyboard_get_param(&h->kb, AS_K_MAG_OPTION, opt, 128) == 0) {
+        if (as_keyboard_get_param(&h->kb, AS_K_MAG_ACTUATION, act,
+                                  AS_KB_KEY_MAX) == 0 &&
+            as_keyboard_get_param(&h->kb, AS_K_MAG_RELEASE, rel,
+                                  AS_KB_KEY_MAX) == 0 &&
+            as_keyboard_get_param(&h->kb, AS_K_MAG_RT_PRESS, rtp,
+                                  AS_KB_KEY_MAX) == 0 &&
+            as_keyboard_get_param(&h->kb, AS_K_MAG_RT_RELEASE, rtr,
+                                  AS_KB_KEY_MAX) == 0 &&
+            as_keyboard_get_param(&h->kb, AS_K_MAG_DEADZONE, dz,
+                                  AS_KB_KEY_MAX) == 0 &&
+            as_keyboard_get_param(&h->kb, AS_K_MAG_OPTION, opt,
+                                  AS_KB_KEY_MAX) == 0) {
             dev->actuation = as_kb_value_to_mm(&h->kb, AS_K_MAG_ACTUATION, act[0]);
             dev->release = as_kb_value_to_mm(&h->kb, AS_K_MAG_RELEASE, rel[0]);
             dev->rt_press = as_kb_value_to_mm(&h->kb, AS_K_MAG_RT_PRESS, rtp[0]);
             dev->rt_release = as_kb_value_to_mm(&h->kb, AS_K_MAG_RT_RELEASE, rtr[0]);
             dev->deadzone = as_kb_value_to_mm(&h->kb, AS_K_MAG_DEADZONE, dz[0]);
-            dev->rapid_trigger = (opt[0] & 0x80) != 0;
+            dev->rapid_trigger = (opt[0] & AS_KB_OPTION_RT) != 0;
+            for (int i = 0; i < AS_KB_KEY_MAX; i++) {
+                dev->key_option[i] = (uint8_t)opt[i];
+                dev->key_actuation[i] =
+                    as_kb_value_to_mm(&h->kb, AS_K_MAG_ACTUATION, act[i]);
+                dev->key_release[i] =
+                    as_kb_value_to_mm(&h->kb, AS_K_MAG_RELEASE, rel[i]);
+                dev->key_rt_press[i] =
+                    as_kb_value_to_mm(&h->kb, AS_K_MAG_RT_PRESS, rtp[i]);
+                dev->key_rt_release[i] =
+                    as_kb_value_to_mm(&h->kb, AS_K_MAG_RT_RELEASE, rtr[i]);
+                dev->key_deadzone[i] =
+                    as_kb_value_to_mm(&h->kb, AS_K_MAG_DEADZONE, dz[i]);
+            }
+        }
+        if (as_keyboard_get_param(&h->kb, AS_K_MAG_SOCD_PAIR, pair,
+                                  AS_KB_KEY_MAX) == 0) {
+            for (int i = 0; i < AS_KB_KEY_MAX; i++) {
+                dev->key_pair[i] =
+                    pair[i] >= 0 && pair[i] < AS_KB_KEY_MAX ? (uint8_t)pair[i]
+                                                            : 0;
+            }
+        }
+        if (!h->matrix_valid || h->matrix_profile != st.profile) {
+            h->matrix_valid =
+                as_keyboard_get_keymatrix(&h->kb, h->key_code) == 0;
+            h->matrix_profile = st.profile;
+        }
+        if (h->matrix_valid) {
+            dev->key_code_valid = 1;
+            memcpy(dev->key_code, h->key_code, sizeof(dev->key_code));
         }
     }
     if (st.light.valid) {
@@ -478,6 +521,17 @@ static int apply_keyboard(struct as_keyboard *kb, const AsOpRequest *req)
         return as_keyboard_set_travel(kb, req->rapid_trigger, req->actuation,
                                       req->release, req->rt_press,
                                       req->rt_release, req->deadzone);
+    case AS_OP_KB_KEY_TRAVEL:
+        return as_keyboard_set_key_travel(kb, req->index, req->rapid_trigger,
+                                          req->actuation, req->release,
+                                          req->rt_press, req->rt_release,
+                                          req->deadzone);
+    case AS_OP_KB_SNAP:
+        if (req->snap_disable) {
+            return as_keyboard_clear_snap(kb, req->index);
+        }
+        return as_keyboard_set_snap(kb, req->index, req->value, req->snap_mode,
+                                    req->snap_full_bottom);
     case AS_OP_KB_SIDE_LIGHT:
         request_light(req, &light);
         return as_keyboard_set_sidelight(kb, &light);
@@ -588,7 +642,80 @@ static void apply_optimistic(AsDevice *dev, const AsOpRequest *req)
         dev->rt_press = req->rt_press;
         dev->rt_release = req->rt_release;
         dev->deadzone = req->deadzone;
+        for (int i = 0; i < AS_KB_KEY_MAX; i++) {
+            dev->key_actuation[i] = req->actuation;
+            dev->key_release[i] = req->release;
+            dev->key_rt_press[i] = req->rt_press;
+            dev->key_rt_release[i] = req->rt_release;
+            dev->key_deadzone[i] = req->deadzone;
+            dev->key_option[i] =
+                (uint8_t)((dev->key_option[i] & ~AS_KB_OPTION_RT) |
+                          (req->rapid_trigger ? AS_KB_OPTION_RT : 0));
+        }
         break;
+    case AS_OP_KB_KEY_TRAVEL:
+        if (req->index >= 0 && req->index < AS_KB_KEY_MAX) {
+            int key = req->index;
+
+            dev->key_actuation[key] = req->actuation;
+            dev->key_release[key] = req->release;
+            dev->key_rt_press[key] = req->rt_press;
+            dev->key_rt_release[key] = req->rt_release;
+            dev->key_deadzone[key] = req->deadzone;
+            dev->key_option[key] =
+                (uint8_t)((dev->key_option[key] & ~AS_KB_OPTION_RT) |
+                          (req->rapid_trigger ? AS_KB_OPTION_RT : 0));
+        }
+        break;
+    case AS_OP_KB_SNAP: {
+        int key1 = req->index, key2 = req->value;
+        uint8_t mode1, mode2, fixed;
+
+        if (key1 < 0 || key1 >= AS_KB_KEY_MAX) {
+            break;
+        }
+        if (req->snap_disable) {
+            int partner = dev->key_pair[key1];
+
+            dev->key_option[key1] &= (uint8_t)~AS_KB_OPTION_MODE_MASK;
+            dev->key_pair[key1] = 0;
+            if (partner < AS_KB_KEY_MAX && partner != key1 &&
+                dev->key_pair[partner] == key1) {
+                dev->key_option[partner] &= (uint8_t)~AS_KB_OPTION_MODE_MASK;
+                dev->key_pair[partner] = 0;
+            }
+            break;
+        }
+        if (key2 < 0 || key2 >= AS_KB_KEY_MAX || key2 == key1) {
+            break;
+        }
+        switch (req->snap_mode) {
+        case AS_KB_SNAP_NEUTRAL:
+            mode1 = mode2 = AS_KB_MODE_SNAP_NEUTRAL;
+            break;
+        case AS_KB_SNAP_FIRST:
+            mode1 = AS_KB_MODE_SNAP_PRIORITY;
+            mode2 = AS_KB_MODE_SNAP_OVERRIDDEN;
+            break;
+        case AS_KB_SNAP_SECOND:
+            mode1 = AS_KB_MODE_SNAP_OVERRIDDEN;
+            mode2 = AS_KB_MODE_SNAP_PRIORITY;
+            break;
+        default:
+            mode1 = mode2 = AS_KB_MODE_SNAP;
+            break;
+        }
+        fixed = req->snap_full_bottom ? AS_KB_OPTION_FULL_BOTTOM : 0;
+        dev->key_option[key1] =
+            (uint8_t)((dev->key_option[key1] & ~AS_KB_OPTION_MODE_MASK) |
+                      mode1 | fixed);
+        dev->key_option[key2] =
+            (uint8_t)((dev->key_option[key2] & ~AS_KB_OPTION_MODE_MASK) |
+                      mode2 | fixed);
+        dev->key_pair[key1] = (uint8_t)key2;
+        dev->key_pair[key2] = (uint8_t)key1;
+        break;
+    }
     default:
         break;
     }

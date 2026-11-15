@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "as-ui.h"
@@ -42,6 +43,30 @@ typedef struct {
     AdwPreferencesGroup *side_light_group;
     int side_modes[16];
     int side_mode_count;
+
+    /* One key at a time. The page keeps the matrix positions of the two
+     * combos because the combos are ordered by the physical rows of the
+     * matrix instead of by position number. */
+    AdwComboRow *row_key_select;
+    AdwSpinRow *row_key_actuation;
+    AdwSpinRow *row_key_release;
+    AdwSpinRow *row_key_rt_press;
+    AdwSpinRow *row_key_rt_release;
+    AdwSpinRow *row_key_deadzone;
+    AdwSwitchRow *sw_key_rt;
+    AdwPreferencesGroup *key_group;
+    AdwSwitchRow *sw_snap;
+    AdwComboRow *row_snap_key;
+    AdwComboRow *row_snap_mode;
+    AdwSwitchRow *sw_snap_full;
+    AdwPreferencesGroup *snap_group;
+    guint32 key_signature;
+    int key_selected;        /* index into key_positions */
+    int key_positions[AS_KB_KEY_MAX];
+    int key_count;
+    int partner_positions[AS_KB_KEY_MAX];
+    int partner_count;
+    int partner_for;         /* selected position the partner list was built for */
 } AsKeyboardPage;
 
 /* ---------------------------- write helpers ---------------------------- */
@@ -107,6 +132,171 @@ static void on_travel_control(GtkWidget *widget, GParamSpec *pspec,
     (void)widget;
     (void)pspec;
     apply_travel(data);
+}
+
+/* --------------------------- one key at a time -------------------------- */
+
+static int selected_key(const AsKeyboardPage *p)
+{
+    if (p->key_selected < 0 || p->key_selected >= p->key_count) {
+        return -1;
+    }
+    return p->key_positions[p->key_selected];
+}
+
+static int selected_partner(const AsKeyboardPage *p)
+{
+    guint selected = adw_combo_row_get_selected(p->row_snap_key);
+
+    if (selected >= (guint)p->partner_count) {
+        return -1;
+    }
+    return p->partner_positions[selected];
+}
+
+/* The R85 HE matrix is 15 columns by 6 rows. Walking it row by row makes the
+ * dropdown read like the keyboard instead of like flash addresses. */
+static int key_rank(int pos)
+{
+    if (pos < 90) {
+        return (pos % 6) * 1000 + pos / 6;
+    }
+    return 6000 + pos;
+}
+
+static gint key_rank_cmp(gconstpointer a, gconstpointer b)
+{
+    return key_rank(*(const int *)a) - key_rank(*(const int *)b);
+}
+
+static guint32 key_signature(const AsDevice *dev)
+{
+    guint32 h = dev->key_code_valid ? 1u : 2u;
+
+    for (int i = 0; i < AS_KB_KEY_MAX; i++) {
+        h = h * 31u + dev->key_code[i];
+    }
+    return h;
+}
+
+static void key_label(const AsDevice *dev, int pos, char *buf, size_t len)
+{
+    char name[32];
+
+    if (dev->key_code_valid) {
+        as_kb_key_name(dev->key_code[pos], name, sizeof(name));
+        if (name[0]) {
+            snprintf(buf, len, "%s", name);
+            return;
+        }
+    }
+    snprintf(buf, len, "Поз. %d", pos + 1);
+}
+
+static GtkStringList *key_model(const AsDevice *dev, const int *positions,
+                                int count)
+{
+    GtkStringList *list = gtk_string_list_new(NULL);
+
+    for (int i = 0; i < count; i++) {
+        char buf[64];
+
+        key_label(dev, positions[i], buf, sizeof(buf));
+        gtk_string_list_append(list, buf);
+    }
+    return list;
+}
+
+/* Rebuilds the two combos when the matrix changes, and the partner combo when
+ * another key is selected. Both are guarded by update_page(), so replacing a
+ * model never writes to the device. */
+static void rebuild_key_lists(AsKeyboardPage *p, AsDevice *dev)
+{
+    guint32 sig = key_signature(dev);
+    int previous = selected_key(p);
+    int selected;
+
+    if (sig != p->key_signature) {
+        int count = 0;
+
+        p->key_signature = sig;
+        for (int i = 0; i < AS_KB_KEY_MAX; i++) {
+            if (dev->key_code_valid && dev->key_code[i] == 0) {
+                continue;
+            }
+            p->key_positions[count++] = i;
+        }
+        qsort(p->key_positions, (size_t)count, sizeof(p->key_positions[0]),
+              key_rank_cmp);
+        p->key_count = count;
+        adw_combo_row_set_model(p->row_key_select,
+                                G_LIST_MODEL(key_model(dev, p->key_positions,
+                                                       count)));
+        /* Keep pointing at the same physical key when the matrix changes. */
+        p->key_selected = count > 0 ? 0 : -1;
+        for (int i = 0; i < count; i++) {
+            if (p->key_positions[i] == previous) {
+                p->key_selected = i;
+            }
+        }
+        p->partner_for = -1;
+    }
+    selected = selected_key(p);
+    if (selected != p->partner_for) {
+        int count = 0;
+
+        p->partner_for = selected;
+        for (int i = 0; i < p->key_count; i++) {
+            if (p->key_positions[i] != selected) {
+                p->partner_positions[count++] = p->key_positions[i];
+            }
+        }
+        p->partner_count = count;
+        adw_combo_row_set_model(p->row_snap_key,
+                                G_LIST_MODEL(key_model(dev,
+                                                       p->partner_positions,
+                                                       count)));
+    }
+}
+
+static void apply_key_travel(AsKeyboardPage *p)
+{
+    AsOpRequest req = {
+        .op = AS_OP_KB_KEY_TRAVEL,
+        .index = selected_key(p),
+        .rapid_trigger = adw_switch_row_get_active(p->sw_key_rt),
+        .actuation = adw_spin_row_get_value(p->row_key_actuation),
+        .release = adw_spin_row_get_value(p->row_key_release),
+        .rt_press = adw_spin_row_get_value(p->row_key_rt_press),
+        .rt_release = adw_spin_row_get_value(p->row_key_rt_release),
+        .deadzone = adw_spin_row_get_value(p->row_key_deadzone),
+    };
+
+    if (!p->page.updating && req.index >= 0) {
+        as_page_queue(&p->page, &req);
+    }
+}
+
+static void apply_snap(AsKeyboardPage *p, int disable)
+{
+    AsOpRequest req = {
+        .op = AS_OP_KB_SNAP,
+        .index = selected_key(p),
+        .snap_disable = disable,
+    };
+
+    if (p->page.updating || req.index < 0) {
+        return;
+    }
+    if (!disable) {
+        req.value = selected_partner(p);
+        if (req.value < 0) {
+            return;
+        }
+        req.snap_mode = (int)adw_combo_row_get_selected(p->row_snap_mode);
+        req.snap_full_bottom = adw_switch_row_get_active(p->sw_snap_full);
+    }
+    as_store_apply(p->page.store, p->page.path, &req);
 }
 
 static void apply_zone_power(AdwSwitchRow *row, GParamSpec *pspec,
@@ -272,6 +462,55 @@ static void update_page(AsKeyboardPage *p)
         gtk_widget_set_sensitive(GTK_WIDGET(p->sw_side_dazzle), light_on && side_on);
         gtk_widget_set_sensitive(GTK_WIDGET(p->side_color), light_on && side_on);
     }
+    gtk_widget_set_visible(GTK_WIDGET(p->key_group), dev->mag_mode >= 0);
+    gtk_widget_set_visible(GTK_WIDGET(p->snap_group), dev->mag_mode >= 0);
+    if (dev->mag_mode >= 0) {
+        int key, mode, partner = -1, partner_index = -1;
+
+        rebuild_key_lists(p, dev);
+        if (p->key_selected < 0 && p->key_count > 0) {
+            p->key_selected = 0;
+        }
+        key = selected_key(p);
+        as_ui_combo_set(p->row_key_select, &p->page.updating, p->key_selected);
+        if (key >= 0) {
+            as_ui_spin_set(p->row_key_actuation, &p->page.updating,
+                           dev->key_actuation[key]);
+            as_ui_spin_set(p->row_key_release, &p->page.updating,
+                           dev->key_release[key]);
+            as_ui_spin_set(p->row_key_rt_press, &p->page.updating,
+                           dev->key_rt_press[key]);
+            as_ui_spin_set(p->row_key_rt_release, &p->page.updating,
+                           dev->key_rt_release[key]);
+            as_ui_spin_set(p->row_key_deadzone, &p->page.updating,
+                           dev->key_deadzone[key]);
+            as_ui_switch_set(p->sw_key_rt, &p->page.updating,
+                             dev->key_option[key] & AS_KB_OPTION_RT);
+        }
+        mode = key >= 0 ? as_kb_snap_mode_of(dev->key_option, dev->key_pair,
+                                             key)
+                        : -1;
+        if (mode >= 0) {
+            partner = dev->key_pair[key];
+        }
+        for (int i = 0; i < p->partner_count; i++) {
+            if (p->partner_positions[i] == partner) {
+                partner_index = i;
+            }
+        }
+        /* Offer the first free key as the partner, so Snap Tap can be turned
+         * on without picking both keys first. */
+        if (partner_index < 0 && p->partner_count > 0) {
+            partner_index = 0;
+        }
+        as_ui_switch_set(p->sw_snap, &p->page.updating, mode >= 0);
+        as_ui_combo_set(p->row_snap_key, &p->page.updating, partner_index);
+        as_ui_combo_set(p->row_snap_mode, &p->page.updating,
+                        mode >= 0 ? mode : AS_KB_SNAP_LAST);
+        as_ui_switch_set(p->sw_snap_full, &p->page.updating,
+                         key >= 0 && (dev->key_option[key] &
+                                      AS_KB_OPTION_FULL_BOTTOM));
+    }
     p->page.updating = FALSE;
 }
 
@@ -279,6 +518,46 @@ static void on_store_changed(AsStore *store, gpointer box)
 {
     (void)store;
     update_page(g_object_get_data(G_OBJECT(box), "as-page"));
+}
+
+/* Selecting another key only reloads the controls; nothing is written until
+ * one of them changes. */
+static void on_key_selected(AdwComboRow *row, GParamSpec *pspec, gpointer data)
+{
+    AsKeyboardPage *p = data;
+
+    (void)pspec;
+    if (p->page.updating) {
+        return;
+    }
+    p->key_selected = (int)adw_combo_row_get_selected(row);
+    update_page(p);
+}
+
+static void on_key_travel(GtkWidget *widget, GParamSpec *pspec, gpointer data)
+{
+    (void)widget;
+    (void)pspec;
+    apply_key_travel(data);
+}
+
+static void on_snap_toggle(AdwSwitchRow *row, GParamSpec *pspec, gpointer data)
+{
+    AsKeyboardPage *p = data;
+
+    (void)pspec;
+    apply_snap(p, !adw_switch_row_get_active(row));
+}
+
+static void on_snap_control(GtkWidget *widget, GParamSpec *pspec, gpointer data)
+{
+    AsKeyboardPage *p = data;
+
+    (void)widget;
+    (void)pspec;
+    if (adw_switch_row_get_active(p->sw_snap)) {
+        apply_snap(p, 0);
+    }
 }
 
 /* ------------------------------ construction --------------------------- */
@@ -352,6 +631,91 @@ static AdwPreferencesGroup *build_travel(AsKeyboardPage *p)
     return group;
 }
 
+static AdwPreferencesGroup *build_key_travel(AsKeyboardPage *p)
+{
+    AdwPreferencesGroup *group = as_ui_group(
+        "Отдельная клавиша",
+        "Сначала выберите клавишу, затем задайте её ход. Значения остальных "
+        "клавиш не меняются.");
+    AdwSpinRow **rows[] = { &p->row_key_actuation, &p->row_key_release,
+                            &p->row_key_rt_press, &p->row_key_rt_release,
+                            &p->row_key_deadzone };
+    const char *titles[] = { "Точка срабатывания", "Точка отпускания",
+                            "Rapid Trigger: нажатие", "Rapid Trigger: отпускание",
+                            "Мёртвая зона" };
+
+    p->key_group = group;
+    p->key_selected = -1;
+    p->partner_for = -2;
+    {
+        GtkStringList *empty = gtk_string_list_new(NULL);
+
+        p->row_key_select = as_ui_combo("Клавиша", G_LIST_MODEL(empty));
+        g_object_unref(empty);
+    }
+    g_signal_connect(p->row_key_select, "notify::selected",
+                     G_CALLBACK(on_key_selected), p);
+    adw_preferences_group_add(group, GTK_WIDGET(p->row_key_select));
+
+    for (size_t i = 0; i < G_N_ELEMENTS(rows); i++) {
+        *rows[i] = as_ui_spin(titles[i], i == 4 ? 0.0 : 0.1,
+                              i == 4 ? 1.0 : 4.0, 0.1, "мм");
+        adw_spin_row_set_digits(*rows[i], 2);
+        g_signal_connect(*rows[i], "notify::value",
+                         G_CALLBACK(on_key_travel), p);
+        adw_preferences_group_add(group, GTK_WIDGET(*rows[i]));
+    }
+    p->sw_key_rt = as_ui_switch_row("Rapid Trigger", NULL);
+    g_signal_connect(p->sw_key_rt, "notify::active",
+                     G_CALLBACK(on_key_travel), p);
+    adw_preferences_group_add(group, GTK_WIDGET(p->sw_key_rt));
+    return group;
+}
+
+static AdwPreferencesGroup *build_snap(AsKeyboardPage *p)
+{
+    AdwPreferencesGroup *group = as_ui_group(
+        "Snap Tap",
+        "Две клавиши работают как одна ось: при удержании обеих отпускание "
+        "одной не прерывает движение второй.");
+    GtkStringList *modes = gtk_string_list_new(NULL);
+
+    gtk_string_list_append(modes, "Последнее нажатие");
+    gtk_string_list_append(modes, "Нейтрально (обе отпущены)");
+    gtk_string_list_append(modes, "Первая клавиша в приоритете");
+    gtk_string_list_append(modes, "Вторая клавиша в приоритете");
+
+    p->snap_group = group;
+    p->sw_snap = as_ui_switch_row(
+        "Snap Tap включён", "Пара привязывается к выбранной выше клавише.");
+    g_signal_connect(p->sw_snap, "notify::active",
+                     G_CALLBACK(on_snap_toggle), p);
+    adw_preferences_group_add(group, GTK_WIDGET(p->sw_snap));
+
+    p->row_snap_key = as_ui_combo("Вторая клавиша", NULL);
+    {
+        GtkStringList *empty = gtk_string_list_new(NULL);
+
+        adw_combo_row_set_model(p->row_snap_key, G_LIST_MODEL(empty));
+        g_object_unref(empty);
+    }
+    g_signal_connect(p->row_snap_key, "notify::selected",
+                     G_CALLBACK(on_snap_control), p);
+    adw_preferences_group_add(group, GTK_WIDGET(p->row_snap_key));
+
+    p->row_snap_mode = as_ui_combo("Приоритет", G_LIST_MODEL(modes));
+    g_signal_connect(p->row_snap_mode, "notify::selected",
+                     G_CALLBACK(on_snap_control), p);
+    adw_preferences_group_add(group, GTK_WIDGET(p->row_snap_mode));
+
+    p->sw_snap_full = as_ui_switch_row(
+        "Полное нажатие внизу", "Действие срабатывает только на полном ходе.");
+    g_signal_connect(p->sw_snap_full, "notify::active",
+                     G_CALLBACK(on_snap_control), p);
+    adw_preferences_group_add(group, GTK_WIDGET(p->sw_snap_full));
+    return group;
+}
+
 static GtkColorDialogButton *build_color(AsKeyboardPage *p, int side)
 {
     AdwActionRow *row = as_ui_value_row("Цвет");
@@ -415,6 +779,8 @@ GtkWidget *as_keyboard_page_new(AsStore *store, const char *path)
     adw_preferences_page_add(prefs, build_status(p));
     adw_preferences_page_add(prefs, build_settings(p));
     adw_preferences_page_add(prefs, build_travel(p));
+    adw_preferences_page_add(prefs, build_key_travel(p));
+    adw_preferences_page_add(prefs, build_snap(p));
     adw_preferences_page_add(prefs, build_light(p));
 
     p->side_light_group = as_ui_group(
