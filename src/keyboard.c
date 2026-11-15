@@ -151,6 +151,9 @@ uint8_t as_kb_mm_to_raw(double mm)
     if (raw > 255) {
         raw = 255;
     }
+    if (raw < 1) {
+        raw = 1;
+    }
     return (uint8_t)((int)(raw + 0.5) - 1);
 }
 
