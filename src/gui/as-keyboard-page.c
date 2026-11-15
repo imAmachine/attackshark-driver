@@ -136,7 +136,7 @@ static void apply_zone_power(AdwSwitchRow *row, GParamSpec *pspec,
                                     : 4)
                              : 0;
     } else {
-        req.light_on = adw_switch_row_get_active(row);
+        req.light_on = !adw_switch_row_get_active(row);
     }
     as_store_apply(p->page.store, p->page.path, &req);
 }
@@ -232,7 +232,7 @@ static void update_page(AsKeyboardPage *p)
                     as_ui_rate_to_index(dev->rate));
     gtk_widget_set_visible(GTK_WIDGET(p->light_group), dev->light_valid);
     if (dev->light_valid) {
-        light_on = dev->light_on > 0;
+        light_on = dev->light_on <= 0;
         as_ui_switch_set(p->sw_light, &p->page.updating, light_on);
         as_ui_combo_set(p->row_light_mode, &p->page.updating,
                         as_ui_light_index(p->light_modes, p->light_mode_count,
