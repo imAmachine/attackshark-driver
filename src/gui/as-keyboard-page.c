@@ -133,7 +133,9 @@ static void apply_zone_power(AdwSwitchRow *row, GParamSpec *pspec,
         req.light_mode = adw_switch_row_get_active(row)
                              ? (dev->side_light_mode_saved > 0
                                     ? dev->side_light_mode_saved
-                                    : 4)
+                                    : dev->side_light_mode > 0
+                                      ? dev->side_light_mode
+                                      : 1)
                              : 0;
     } else {
         req.light_on = !adw_switch_row_get_active(row);
