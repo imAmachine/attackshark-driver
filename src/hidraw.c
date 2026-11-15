@@ -300,9 +300,12 @@ static int ioctl_feature(struct as_hid *dev, unsigned long req, uint8_t *buf,
                          size_t len, int timeout_ms)
 {
     struct ioctl_arg a = { dev->fd, req, buf };
+    int ret = with_timeout(timeout_ms, do_ioctl, &a);
 
-    (void)len;
-    return with_timeout(timeout_ms, do_ioctl, &a) < 0 ? -errno : 0;
+    if (ret < 0) {
+        return -errno;
+    }
+    return (size_t)ret == len ? 0 : -EPROTO;
 }
 
 int as_feature_set(struct as_hid *dev, const uint8_t *buf, size_t len)
