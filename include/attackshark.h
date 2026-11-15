@@ -206,7 +206,9 @@ enum as_kb_cmd {
     AS_K_GET_LED = 0x87,
     AS_K_GET_SIDELED = 0x88,
     AS_K_GET_LED_POWER = 0x85,
-    AS_K_GET_KEYMATRIX = 0x8A,
+    /* The vendor driver reads the key matrix with 0x89; the older command
+     * tables list 0x8A, which this firmware does not answer. */
+    AS_K_GET_KEYMATRIX = 0x89,
     AS_K_GET_USB_VERSION = 0x8F,
     AS_K_GET_MAGNETISM_MODE = 0x9D,
     AS_K_GET_MULTI_MAGNETISM = 0xE5,
@@ -229,6 +231,38 @@ enum as_kb_mag_param {
 #define AS_K_REPORT_LEN 64
 #define AS_K_MAG_READ_PAGE 64
 #define AS_K_MAG_WRITE_PAGE 56
+
+/* The Hall-effect tables address every key of the matrix, including the
+ * positions the layout leaves empty. The vendor driver always moves 128
+ * values per parameter, so the driver does the same. */
+#define AS_KB_KEY_MAX 128
+
+/* Per-key option byte (parameter 7): bit 7 Rapid Trigger, bit 6 "full travel
+ * bottom", low nibble the key mode. */
+#define AS_KB_OPTION_RT 0x80
+#define AS_KB_OPTION_FULL_BOTTOM 0x40
+#define AS_KB_OPTION_MODE_MASK 0x0f
+
+enum as_kb_key_mode {
+    AS_KB_MODE_NORMAL = 0,
+    AS_KB_MODE_DKS = 2,
+    AS_KB_MODE_MT = 3,
+    AS_KB_MODE_TGL_HOLD = 4,
+    AS_KB_MODE_TGL_DOTS = 5,
+    AS_KB_MODE_SNAP = 7,
+    AS_KB_MODE_SNAP_NEUTRAL = 8,
+    AS_KB_MODE_SNAP_PRIORITY = 9,
+    AS_KB_MODE_SNAP_OVERRIDDEN = 10,
+};
+
+/* Snap Tap modes as the user sees them: which of the two paired keys wins
+ * while both are held. */
+enum as_kb_snap_mode {
+    AS_KB_SNAP_LAST = 0,
+    AS_KB_SNAP_NEUTRAL = 1,
+    AS_KB_SNAP_FIRST = 2,
+    AS_KB_SNAP_SECOND = 3,
+};
 
 struct as_kb_light {
     int valid;
@@ -301,12 +335,39 @@ double as_kb_value_to_mm(struct as_keyboard *kb, int param, int32_t raw);
 int as_keyboard_set_travel(struct as_keyboard *kb, int rapid_trigger,
                            double actuation, double release, double rt_press,
                            double rt_release, double deadzone);
+/* Same settings for one key of the matrix; the other keys keep their values
+ * and their mode (Snap Tap, DKS and so on). */
+int as_keyboard_set_key_travel(struct as_keyboard *kb, int key,
+                               int rapid_trigger, double actuation,
+                               double release, double rt_press,
+                               double rt_release, double deadzone);
+/* Reads the key code of every matrix position, so the UI can name the keys
+ * instead of showing their indices. Unknown positions read as 0. */
+int as_keyboard_get_keymatrix(struct as_keyboard *kb, uint32_t *codes);
+/* Snap Tap: pairs two keys, and the firmware decides which one stays pressed
+ * while both are held. mode is one of as_kb_snap_mode. */
+int as_keyboard_set_snap(struct as_keyboard *kb, int key1, int key2, int mode,
+                         int full_bottom);
+/* Releases the key from its Snap Tap pair, restoring normal behaviour on both
+ * keys. Does nothing when the key is not paired. */
+int as_keyboard_clear_snap(struct as_keyboard *kb, int key);
 
 int as_kb_rate_code(int hz);
 int as_kb_rate_from_code(int code);
 uint8_t as_kb_mm_to_raw(double mm);
 double as_kb_raw_to_mm(uint8_t raw);
 uint8_t as_kb_deadzone_to_raw(double mm);
+
+/* Snap Tap mode stored for this key, from its own option byte and the pair
+ * table. Returns an as_kb_snap_mode value, or -1 when the key is not part of
+ * a consistent pair. */
+int as_kb_snap_mode_of(const uint8_t *options, const uint8_t *pairs, int key);
+/* Option byte for a key of the given snap mode, keeping the Rapid Trigger bit
+ * of the previous value. */
+uint8_t as_kb_option_value(int mode, int rapid_trigger, int full_bottom);
+/* Short label of a HID key code ("Esc", "A", "PgUp"); an empty string for
+ * unused matrix positions. */
+void as_kb_key_name(unsigned code, char *buf, size_t len);
 
 /* ---------- udev / permissions ---------- */
 

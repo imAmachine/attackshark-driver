@@ -102,12 +102,57 @@ static void test_travel_precision(void)
     printf("travel precision ok\n");
 }
 
+static void test_snap(void)
+{
+    uint8_t options[AS_KB_KEY_MAX] = { 0 }, pairs[AS_KB_KEY_MAX] = { 0 };
+    char buf[16];
+
+    assert(as_kb_option_value(AS_KB_MODE_SNAP, 0, 0) == AS_KB_MODE_SNAP);
+    assert(as_kb_option_value(AS_KB_MODE_SNAP_PRIORITY, 1, 1) ==
+           (AS_KB_MODE_SNAP_PRIORITY | AS_KB_OPTION_RT |
+            AS_KB_OPTION_FULL_BOTTOM));
+
+    options[10] = AS_KB_MODE_SNAP_PRIORITY;
+    options[20] = AS_KB_MODE_SNAP_OVERRIDDEN;
+    pairs[10] = 20;
+    pairs[20] = 10;
+    assert(as_kb_snap_mode_of(options, pairs, 10) == AS_KB_SNAP_FIRST);
+    assert(as_kb_snap_mode_of(options, pairs, 20) == AS_KB_SNAP_SECOND);
+
+    options[10] = options[20] = AS_KB_MODE_SNAP;
+    assert(as_kb_snap_mode_of(options, pairs, 10) == AS_KB_SNAP_LAST);
+    options[10] = options[20] = AS_KB_MODE_SNAP_NEUTRAL;
+    assert(as_kb_snap_mode_of(options, pairs, 10) == AS_KB_SNAP_NEUTRAL);
+
+    /* A pair that does not point back must not be reported. */
+    pairs[20] = 11;
+    assert(as_kb_snap_mode_of(options, pairs, 10) == -1);
+    options[10] = AS_KB_OPTION_RT;
+    pairs[20] = 10;
+    assert(as_kb_snap_mode_of(options, pairs, 10) == -1);
+
+    as_kb_key_name(4, buf, sizeof(buf));
+    assert(strcmp(buf, "A") == 0);
+    as_kb_key_name(41, buf, sizeof(buf));
+    assert(strcmp(buf, "Esc") == 0);
+    as_kb_key_name(58, buf, sizeof(buf));
+    assert(strcmp(buf, "F1") == 0);
+    as_kb_key_name(82, buf, sizeof(buf));
+    assert(strcmp(buf, "↑") == 0);
+    as_kb_key_name(225, buf, sizeof(buf));
+    assert(strcmp(buf, "LShift") == 0);
+    as_kb_key_name(0, buf, sizeof(buf));
+    assert(buf[0] == 0);
+    printf("snap tap codec ok\n");
+}
+
 int main(void)
 {
     test_dpi();
     test_rates();
     test_travel();
     test_travel_precision();
+    test_snap();
     printf("all tests passed\n");
     return 0;
 }

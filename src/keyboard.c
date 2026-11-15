@@ -12,6 +12,7 @@
 #include "internal.h"
 
 #include <errno.h>
+#include <stdio.h>
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
@@ -353,6 +354,64 @@ int as_keyboard_set_param(struct as_keyboard *kb, int param,
     return 0;
 }
 
+/* Writes values for one key only: the vendor protocol takes the key position
+ * instead of a page number, so the other keys are left untouched. */
+static int set_key_values(struct as_keyboard *kb, int param, int key,
+                          const int32_t *values, size_t count, int save)
+{
+    int width = param_width(kb, param);
+    uint8_t args[7 + AS_K_MAG_WRITE_PAGE] = { 0 };
+
+    if (width < 0) {
+        return width;
+    }
+    if (key < 0 || key >= AS_KB_KEY_MAX || count == 0 ||
+        count * (size_t)width > AS_K_MAG_WRITE_PAGE) {
+        return -EINVAL;
+    }
+    args[0] = (uint8_t)param;
+    args[1] = 0; /* one key */
+    args[2] = (uint8_t)key;
+    args[3] = (uint8_t)(save ? 1 : 0);
+    for (size_t i = 0; i < count; i++) {
+        int32_t v = values[i];
+
+        for (int b = 0; b < width; b++) {
+            args[7 + i * (size_t)width + b] = (uint8_t)(v >> (8 * b));
+        }
+    }
+    return as_keyboard_cmd(kb, AS_K_SET_MULTI_MAGNETISM, args,
+                           7 + count * (size_t)width, 0, NULL, 0);
+}
+
+int as_keyboard_get_keymatrix(struct as_keyboard *kb, uint32_t *codes)
+{
+    uint8_t args[2], out[REPORT_LEN];
+    int profile = 0, ret;
+
+    if (as_keyboard_cmd(kb, AS_K_GET_PROFILE, NULL, 0, 0, out,
+                        HS_TIMEOUT_MS) == 0) {
+        profile = out[1];
+    }
+    for (int page = 0; page < AS_KB_KEY_MAX / 16; page++) {
+        args[0] = (uint8_t)profile;
+        args[1] = (uint8_t)page;
+        ret = as_keyboard_cmd(kb, AS_K_GET_KEYMATRIX, args, 2, 0, out,
+                              HS_TIMEOUT_MS);
+        if (ret < 0) {
+            return ret;
+        }
+        for (int i = 0; i < 16; i++) {
+            const uint8_t *p = out + i * 4;
+
+            codes[page * 16 + i] =
+                ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) |
+                ((uint32_t)p[2] << 8) | (uint32_t)p[3];
+        }
+    }
+    return 0;
+}
+
 /* ---------- lighting ---------- */
 
 static void light_args(const struct as_kb_light *l, uint8_t args[7],
@@ -529,8 +588,290 @@ int as_keyboard_set_travel(struct as_keyboard *kb, int rapid_trigger,
          (ret = set_all(kb, AS_K_MAG_RT_RELEASE, rtr, 0)))) {
         return ret;
     }
-    /* The option page enables Rapid Trigger - write it last and save it. */
-    return set_all(kb, AS_K_MAG_OPTION, rapid_trigger ? 0x80 : 0, 1);
+    /* The option page enables Rapid Trigger - write it last and save it. The
+     * low nibble carries the key mode (Snap Tap and friends), so it must
+     * survive a bulk change. */
+    {
+        int32_t options[AS_KB_KEY_MAX];
+
+        if (as_keyboard_get_param(kb, AS_K_MAG_OPTION, options,
+                                  AS_N(options)) == 0) {
+            for (size_t i = 0; i < AS_N(options); i++) {
+                options[i] = (options[i] & ~AS_KB_OPTION_RT) |
+                             (rapid_trigger ? AS_KB_OPTION_RT : 0);
+            }
+            return as_keyboard_set_param(kb, AS_K_MAG_OPTION, options,
+                                         AS_N(options), 1);
+        }
+    }
+    return set_all(kb, AS_K_MAG_OPTION, rapid_trigger ? AS_KB_OPTION_RT : 0, 1);
+}
+
+uint8_t as_kb_option_value(int mode, int rapid_trigger, int full_bottom)
+{
+    return (uint8_t)(((rapid_trigger ? AS_KB_OPTION_RT : 0) |
+                      (full_bottom ? AS_KB_OPTION_FULL_BOTTOM : 0) |
+                      (mode & AS_KB_OPTION_MODE_MASK)));
+}
+
+int as_keyboard_set_key_travel(struct as_keyboard *kb, int key,
+                               int rapid_trigger, double actuation,
+                               double release, double rt_press,
+                               double rt_release, double deadzone)
+{
+    int32_t act = encode_value(kb, AS_K_MAG_ACTUATION, actuation);
+    int32_t rel = encode_value(kb, AS_K_MAG_RELEASE, release);
+    int32_t dz = encode_value(kb, AS_K_MAG_DEADZONE, deadzone);
+    int32_t rtp = encode_value(kb, AS_K_MAG_RT_PRESS, rt_press);
+    int32_t rtr = encode_value(kb, AS_K_MAG_RT_RELEASE, rt_release);
+    int32_t options[AS_KB_KEY_MAX];
+    uint8_t option;
+    int ret;
+
+    if (act < 0 || rel < 0 || dz < 0 || rtp < 0 || rtr < 0) {
+        return -ENODATA;
+    }
+    if (key < 0 || key >= AS_KB_KEY_MAX) {
+        return -EINVAL;
+    }
+    if (as_keyboard_get_param(kb, AS_K_MAG_OPTION, options,
+                              AS_N(options)) < 0) {
+        options[key] = 0;
+    }
+    option = (uint8_t)((options[key] & ~AS_KB_OPTION_RT) |
+                       (rapid_trigger ? AS_KB_OPTION_RT : 0));
+    if ((ret = set_key_values(kb, AS_K_MAG_ACTUATION, key, &act, 1, 0)) ||
+        (ret = set_key_values(kb, AS_K_MAG_RELEASE, key, &rel, 1, 0)) ||
+        (ret = set_key_values(kb, AS_K_MAG_DEADZONE, key, &dz, 1, 0))) {
+        return ret;
+    }
+    if (rapid_trigger &&
+        ((ret = set_key_values(kb, AS_K_MAG_RT_PRESS, key, &rtp, 1, 0)) ||
+         (ret = set_key_values(kb, AS_K_MAG_RT_RELEASE, key, &rtr, 1, 0)))) {
+        return ret;
+    }
+    return set_key_values(kb, AS_K_MAG_OPTION, key,
+                          (int32_t[]){ option }, 1, 1);
+}
+
+static int key_mode_is_snap(int32_t option)
+{
+    switch (option & AS_KB_OPTION_MODE_MASK) {
+    case AS_KB_MODE_SNAP:
+    case AS_KB_MODE_SNAP_NEUTRAL:
+    case AS_KB_MODE_SNAP_PRIORITY:
+    case AS_KB_MODE_SNAP_OVERRIDDEN:
+        return 1;
+    default:
+        return 0;
+    }
+}
+
+int as_kb_snap_mode_of(const uint8_t *options, const uint8_t *pairs, int key)
+{
+    int partner;
+
+    if (key < 0 || key >= AS_KB_KEY_MAX) {
+        return -1;
+    }
+    if (!key_mode_is_snap(options[key])) {
+        return -1;
+    }
+    partner = pairs[key];
+    if (partner < 0 || partner >= AS_KB_KEY_MAX || partner == key ||
+        pairs[partner] != key) {
+        return -1;
+    }
+    switch (options[key] & AS_KB_OPTION_MODE_MASK) {
+    case AS_KB_MODE_SNAP:
+        return AS_KB_SNAP_LAST;
+    case AS_KB_MODE_SNAP_NEUTRAL:
+        return AS_KB_SNAP_NEUTRAL;
+    case AS_KB_MODE_SNAP_PRIORITY:
+        return AS_KB_SNAP_FIRST;
+    case AS_KB_MODE_SNAP_OVERRIDDEN:
+        return AS_KB_SNAP_SECOND;
+    default:
+        return -1;
+    }
+}
+
+/* Restores normal behaviour on one key without touching its other bits. */
+static int reset_key_mode(struct as_keyboard *kb, int32_t option, int key,
+                          int save)
+{
+    int32_t value = option & ~AS_KB_OPTION_MODE_MASK;
+    int ret = set_key_values(kb, AS_K_MAG_OPTION, key, &value, 1, save);
+
+    if (ret < 0) {
+        return ret;
+    }
+    return set_key_values(kb, AS_K_MAG_SOCD_PAIR, key, (int32_t[]){ 0 }, 1,
+                          save);
+}
+
+int as_keyboard_clear_snap(struct as_keyboard *kb, int key)
+{
+    int32_t options[AS_KB_KEY_MAX], pairs[AS_KB_KEY_MAX];
+    int partner, ret;
+
+    if (key < 0 || key >= AS_KB_KEY_MAX) {
+        return -EINVAL;
+    }
+    if ((ret = as_keyboard_get_param(kb, AS_K_MAG_OPTION, options,
+                                     AS_N(options))) ||
+        (ret = as_keyboard_get_param(kb, AS_K_MAG_SOCD_PAIR, pairs,
+                                     AS_N(pairs)))) {
+        return ret;
+    }
+    partner = pairs[key];
+    if (partner >= 0 && partner < AS_KB_KEY_MAX && partner != key &&
+        pairs[partner] == key && key_mode_is_snap(options[partner]) &&
+        (ret = reset_key_mode(kb, options[partner], partner,
+                              !key_mode_is_snap(options[key])))) {
+        return ret;
+    }
+    if (!key_mode_is_snap(options[key])) {
+        return 0;
+    }
+    return reset_key_mode(kb, options[key], key, 1);
+}
+
+int as_keyboard_set_snap(struct as_keyboard *kb, int key1, int key2, int mode,
+                         int full_bottom)
+{
+    int32_t options[AS_KB_KEY_MAX], pairs[AS_KB_KEY_MAX];
+    int stale[2] = { -1, -1 };
+    uint8_t opt1, opt2;
+    int32_t pair1, pair2;
+    int ret;
+
+    if (key1 < 0 || key1 >= AS_KB_KEY_MAX || key2 < 0 ||
+        key2 >= AS_KB_KEY_MAX || key1 == key2) {
+        return -EINVAL;
+    }
+    if ((ret = as_keyboard_get_param(kb, AS_K_MAG_OPTION, options,
+                                     AS_N(options))) ||
+        (ret = as_keyboard_get_param(kb, AS_K_MAG_SOCD_PAIR, pairs,
+                                     AS_N(pairs)))) {
+        return ret;
+    }
+    /* Keys already paired elsewhere must not stay in two pairs: the firmware
+     * would keep the old partner marked as part of a Snap Tap pair. */
+    stale[0] = pairs[key1];
+    stale[1] = pairs[key2];
+    for (int i = 0; i < 2; i++) {
+        int old = stale[i];
+
+        if (old >= 0 && old < AS_KB_KEY_MAX && old != key1 && old != key2 &&
+            pairs[old] == (i == 0 ? key1 : key2) &&
+            key_mode_is_snap(options[old]) &&
+            (ret = reset_key_mode(kb, options[old], old, 0))) {
+            return ret;
+        }
+    }
+
+    switch (mode) {
+    case AS_KB_SNAP_NEUTRAL:
+        opt1 = as_kb_option_value(AS_KB_MODE_SNAP_NEUTRAL, 0, full_bottom);
+        opt2 = opt1;
+        break;
+    case AS_KB_SNAP_FIRST:
+        opt1 = as_kb_option_value(AS_KB_MODE_SNAP_PRIORITY, 0, full_bottom);
+        opt2 = as_kb_option_value(AS_KB_MODE_SNAP_OVERRIDDEN, 0, full_bottom);
+        break;
+    case AS_KB_SNAP_SECOND:
+        opt1 = as_kb_option_value(AS_KB_MODE_SNAP_OVERRIDDEN, 0, full_bottom);
+        opt2 = as_kb_option_value(AS_KB_MODE_SNAP_PRIORITY, 0, full_bottom);
+        break;
+    case AS_KB_SNAP_LAST:
+    default:
+        opt1 = as_kb_option_value(AS_KB_MODE_SNAP, 0, full_bottom);
+        opt2 = opt1;
+        break;
+    }
+    opt1 |= (uint8_t)(options[key1] & AS_KB_OPTION_RT);
+    opt2 |= (uint8_t)(options[key2] & AS_KB_OPTION_RT);
+    pair1 = key2;
+    pair2 = key1;
+
+    if ((ret = set_key_values(kb, AS_K_MAG_OPTION, key1, (int32_t[]){ opt1 },
+                              1, 0)) ||
+        (ret = set_key_values(kb, AS_K_MAG_OPTION, key2, (int32_t[]){ opt2 },
+                              1, 0)) ||
+        (ret = set_key_values(kb, AS_K_MAG_SOCD_PAIR, key1, &pair1, 1, 0))) {
+        return ret;
+    }
+    return set_key_values(kb, AS_K_MAG_SOCD_PAIR, key2, &pair2, 1, 1);
+}
+
+/* ---------- key names ---------- */
+
+static const char *const letter_names[] = {
+    "A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M",
+    "N", "O", "P", "Q", "R", "S", "T", "U", "V", "W", "X", "Y", "Z",
+};
+static const char *const number_names[] = {
+    "1", "2", "3", "4", "5", "6", "7", "8", "9", "0",
+};
+static const char *const modifier_names[] = {
+    "LCtrl", "LShift", "LAlt", "LWin", "RCtrl", "RShift", "RAlt", "RWin",
+};
+static const char *const nav_names[] = {
+    "Ins", "Home", "PgUp", "Del", "End", "PgDn", "→", "←", "↓", "↑",
+    "NumLk", "KP/",
+};
+static const char *const punctuation_names[] = {
+    /* 45..56 */
+    "-", "=", "[", "]", "\\", "#~", ";", "'", "`", ",", ".", "/",
+};
+
+void as_kb_key_name(unsigned code, char *buf, size_t len)
+{
+    const char *name = NULL;
+
+    if (code >= 0x10000) {
+        /* Vendor keys (Fn layer, media) have no HID code of their own. */
+        name = "Fn";
+    } else if (code >= 4 && code <= 29) {
+        name = letter_names[code - 4];
+    } else if (code >= 30 && code <= 39) {
+        name = number_names[code - 30];
+    } else if (code >= 45 && code <= 56) {
+        name = punctuation_names[code - 45];
+    } else if (code >= 58 && code <= 69) {
+        static char fkey[4];
+
+        snprintf(fkey, sizeof(fkey), "F%d", code - 57);
+        name = fkey;
+    } else if (code >= 73 && code <= 84) {
+        name = nav_names[code - 73];
+    } else if (code >= 224 && code <= 231) {
+        name = modifier_names[code - 224];
+    } else {
+        static char other[16];
+
+        switch (code) {
+        case 40: name = "Enter"; break;
+        case 41: name = "Esc"; break;
+        case 42: name = "Backspace"; break;
+        case 43: name = "Tab"; break;
+        case 44: name = "Space"; break;
+        case 57: name = "Caps"; break;
+        case 70: name = "PrtSc"; break;
+        case 71: name = "ScrLk"; break;
+        case 72: name = "Pause"; break;
+        case 0: name = ""; break;
+        default:
+            snprintf(other, sizeof(other), "0x%x", code);
+            name = other;
+            break;
+        }
+    }
+    if (!name) {
+        name = "";
+    }
+    snprintf(buf, len, "%s", name);
 }
 
 static int kb_query(struct as_keyboard *kb, uint8_t cmd, const uint8_t *args,
