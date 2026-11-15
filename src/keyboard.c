@@ -177,17 +177,30 @@ uint8_t as_kb_deadzone_to_raw(double mm)
 
 int as_keyboard_open_analog(struct as_keyboard *kb)
 {
-    int ret;
+    struct as_hid found[AS_HID_MAX];
+    size_t base_len;
+    int n;
 
     if (kb->analog_open) {
         return 0;
     }
-    ret = as_hid_open_first(is_analog, 0x3151, &kb->analog);
-    if (ret < 0) {
-        return ret;
+    base_len = strcspn(kb->hid.phys, "/");
+    n = as_hid_scan(found, AS_HID_MAX);
+    for (int i = 0; i < n; i++) {
+        if (is_analog(&found[i]) &&
+            strncmp(found[i].phys, kb->hid.phys, base_len) == 0 &&
+            found[i].phys[base_len] == '/') {
+            int ret = as_hid_open(&found[i]);
+
+            if (ret < 0) {
+                return ret;
+            }
+            kb->analog = found[i];
+            kb->analog_open = 1;
+            return 0;
+        }
     }
-    kb->analog_open = 1;
-    return 0;
+    return -ENODEV;
 }
 
 int as_keyboard_enable_stream(struct as_keyboard *kb, int on)
