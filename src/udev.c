@@ -219,7 +219,7 @@ static int run_tool(char *const argv[])
 {
     pid_t pid;
     int status;
-    int rc = posix_spawnp(&pid, argv[0], NULL, NULL, argv, environ);
+    int rc = posix_spawn(&pid, argv[0], NULL, NULL, argv, environ);
 
     if (rc != 0) {
         return -rc;
@@ -234,9 +234,10 @@ static int run_tool(char *const argv[])
 
 int as_udev_install(char *err, size_t errlen)
 {
-    char *const reload[] = { "udevadm", "control", "--reload-rules", NULL };
-    char *const trigger[] = { "udevadm", "trigger", "--subsystem-match=hidraw",
-                              NULL };
+    char *const reload[] = { "/usr/bin/udevadm", "udevadm", "control",
+                             "--reload-rules", NULL };
+    char *const trigger[] = { "/usr/bin/udevadm", "udevadm", "trigger",
+                              "--subsystem-match=hidraw", NULL };
     char *text;
     int rc;
 
