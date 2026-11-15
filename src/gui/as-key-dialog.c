@@ -9,6 +9,7 @@
 
 #include "as-ui.h"
 
+#include <math.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -109,11 +110,34 @@ typedef struct {
     GtkWidget *apply;
     GtkWidget *status;
     AdwComboRow *switch_row;
+    GtkWidget *group_buttons[4];
     guint32 signature;
     gboolean updating;
 } KeyDialog;
 
+enum {
+    GROUP_ALL,
+    GROUP_LETTERS,
+    GROUP_DIGITS,
+    GROUP_SPECIAL,
+};
+
+static gboolean group_contains(int group, unsigned code)
+{
+    switch (group) {
+    case GROUP_LETTERS:
+        return code >= 4 && code <= 29;
+    case GROUP_DIGITS:
+        return code >= 30 && code <= 39;
+    case GROUP_SPECIAL:
+        return code >= 224 && code <= 231;
+    default:
+        return TRUE;
+    }
+}
+
 static void load_values(KeyDialog *d);
+static void refresh_key_styles(KeyDialog *d);
 
 static guint32 device_signature(const AsDevice *dev)
 {
@@ -136,6 +160,7 @@ static void refresh_from_device(KeyDialog *d)
         return;
     }
     d->signature = device_signature(dev);
+    refresh_key_styles(d);
     load_values(d);
 }
 
@@ -222,6 +247,40 @@ static int first_selected(const KeyDialog *d)
     return -1;
 }
 
+static void set_class(GtkWidget *widget, const char *name, gboolean on)
+{
+    if (on) {
+        gtk_widget_add_css_class(widget, name);
+    } else {
+        gtk_widget_remove_css_class(widget, name);
+    }
+}
+
+/* Shows what is already configured on the board: a tinted key has Rapid
+ * Trigger, an outlined key belongs to a Snap Tap pair, and a bold key has a
+ * travel different from the bulk setting. */
+static void refresh_key_styles(KeyDialog *d)
+{
+    AsDevice *dev = as_store_lookup(d->store, d->path);
+
+    if (!dev) {
+        return;
+    }
+    for (size_t i = 0; i < G_N_ELEMENTS(keyboxes); i++) {
+        int pos = keyboxes[i].pos;
+        gboolean snap = as_kb_snap_mode_of(dev->key_option, dev->key_pair,
+                                           pos) >= 0;
+        gboolean rt = (dev->key_option[pos] & AS_KB_OPTION_RT) != 0;
+        gboolean changed =
+            fabs(dev->key_actuation[pos] - dev->actuation) > 0.005 ||
+            fabs(dev->key_release[pos] - dev->release) > 0.005;
+
+        set_class(d->buttons[i], "rt", rt);
+        set_class(d->buttons[i], "snap", snap);
+        set_class(d->buttons[i], "changed", changed);
+    }
+}
+
 static void load_values(KeyDialog *d)
 {
     AsDevice *dev = as_store_lookup(d->store, d->path);
@@ -241,7 +300,10 @@ static void load_values(KeyDialog *d)
     as_ui_switch_set(d->rt, &d->updating,
                      dev->key_option[key] & AS_KB_OPTION_RT);
     d->updating = previous;
+    refresh_key_styles(d);
 }
+
+static void refresh_group_buttons(KeyDialog *d);
 
 static void update_status(KeyDialog *d)
 {
@@ -251,6 +313,7 @@ static void update_status(KeyDialog *d)
     snprintf(buf, sizeof(buf), "Выбрано клавиш: %d", n);
     gtk_label_set_text(GTK_LABEL(d->status), buf);
     gtk_widget_set_sensitive(d->apply, n > 0);
+    refresh_group_buttons(d);
 }
 
 static void on_key_toggled(GtkToggleButton *button, gpointer data)
@@ -278,57 +341,68 @@ static void sync_selection(KeyDialog *d)
     load_values(d);
 }
 
-static void select_all(KeyDialog *d, gboolean active)
+static gboolean group_all_selected(const KeyDialog *d, int group)
 {
+    gboolean any = FALSE;
+
+    for (size_t i = 0; i < G_N_ELEMENTS(keyboxes); i++) {
+        if (!group_contains(group, keyboxes[i].code)) {
+            continue;
+        }
+        any = TRUE;
+        if (!d->selected[keyboxes[i].pos]) {
+            return FALSE;
+        }
+    }
+    return any;
+}
+
+static void refresh_group_buttons(KeyDialog *d)
+{
+    gboolean previous = d->updating;
+
+    d->updating = TRUE;
+    for (int group = 0; group < 4; group++) {
+        gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(d->group_buttons[group]),
+                                     group_all_selected(d, group));
+    }
+    d->updating = previous;
+}
+
+static void on_none(GtkButton *button, gpointer data)
+{
+    (void)button;
+    KeyDialog *d = data;
+
     d->updating = TRUE;
     for (size_t i = 0; i < G_N_ELEMENTS(keyboxes); i++) {
-        gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(d->buttons[i]), active);
+        gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(d->buttons[i]), FALSE);
     }
     d->updating = FALSE;
     sync_selection(d);
 }
 
-static void select_codes(KeyDialog *d, unsigned lo, unsigned hi)
+static void on_group_toggled(GtkToggleButton *button, gpointer data)
 {
+    KeyDialog *d = data;
+    int group = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(button), "as-group"));
+    gboolean select;
+
+    if (d->updating) {
+        return;
+    }
+    /* A second press on a group clears exactly that group, so a group that
+     * was selected next to the others can be removed without losing them. */
+    select = !group_all_selected(d, group);
     d->updating = TRUE;
     for (size_t i = 0; i < G_N_ELEMENTS(keyboxes); i++) {
-        if (keyboxes[i].code >= lo && keyboxes[i].code <= hi) {
+        if (group_contains(group, keyboxes[i].code)) {
             gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(d->buttons[i]),
-                                         TRUE);
+                                         select);
         }
     }
     d->updating = FALSE;
     sync_selection(d);
-}
-
-static void on_select_all(GtkButton *button, gpointer data)
-{
-    (void)button;
-    select_all(data, TRUE);
-}
-
-static void on_select_none(GtkButton *button, gpointer data)
-{
-    (void)button;
-    select_all(data, FALSE);
-}
-
-static void on_select_letters(GtkButton *button, gpointer data)
-{
-    (void)button;
-    select_codes(data, 4, 29);
-}
-
-static void on_select_digits(GtkButton *button, gpointer data)
-{
-    (void)button;
-    select_codes(data, 30, 39);
-}
-
-static void on_select_modifiers(GtkButton *button, gpointer data)
-{
-    (void)button;
-    select_codes(data, 224, 231);
 }
 
 static void on_apply(GtkButton *button, gpointer data)
@@ -419,6 +493,74 @@ static GtkWidget *make_button(const char *label, GCallback callback,
     return button;
 }
 
+/* Press test: the dialog follows the physical keyboard and lights the key
+ * that is held, so the row that is being configured can be found by touch. */
+static GtkWidget *button_for_code(KeyDialog *d, unsigned code)
+{
+    if (!code) {
+        return NULL;
+    }
+    for (size_t i = 0; i < G_N_ELEMENTS(keyboxes); i++) {
+        if (keyboxes[i].code == code) {
+            return d->buttons[i];
+        }
+    }
+    return NULL;
+}
+
+static gboolean on_test_pressed(GtkEventControllerKey *controller,
+                                guint keyval, guint keycode,
+                                GdkModifierType state, gpointer data)
+{
+    KeyDialog *d = data;
+    GtkWidget *button =
+        button_for_code(d, as_ui_hid_from_keyval(keyval));
+
+    (void)controller;
+    (void)keycode;
+    (void)state;
+    if (button) {
+        gtk_widget_add_css_class(button, "pressed");
+    }
+    return FALSE;
+}
+
+static void on_test_released(GtkEventControllerKey *controller, guint keyval,
+                             guint keycode, GdkModifierType state,
+                             gpointer data)
+{
+    KeyDialog *d = data;
+    GtkWidget *button =
+        button_for_code(d, as_ui_hid_from_keyval(keyval));
+
+    (void)controller;
+    (void)keycode;
+    (void)state;
+    if (button) {
+        gtk_widget_remove_css_class(button, "pressed");
+    }
+}
+
+static GtkWidget *make_legend(void)
+{
+    GtkWidget *box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 16);
+    GtkWidget *rt = gtk_label_new(NULL);
+    GtkWidget *snap = gtk_label_new(NULL);
+    GtkWidget *changed = gtk_label_new(NULL);
+
+    gtk_label_set_markup(GTK_LABEL(rt),
+                         "<span foreground='#2ec27e'>●</span> Rapid Trigger");
+    gtk_label_set_markup(GTK_LABEL(snap),
+                         "<span foreground='#e66100'>▣</span> Snap Tap");
+    gtk_label_set_markup(GTK_LABEL(changed),
+                         "<span foreground='#3584e4'><b>●</b></span> "
+                         "отдельный ход");
+    gtk_box_append(GTK_BOX(box), rt);
+    gtk_box_append(GTK_BOX(box), snap);
+    gtk_box_append(GTK_BOX(box), changed);
+    return box;
+}
+
 static void dialog_free(gpointer data)
 {
     g_free(data);
@@ -437,7 +579,13 @@ static void load_css(void)
     gtk_css_provider_load_from_string(
         provider,
         "button.keycap { min-height: 0; min-width: 0; padding: 0 2px;"
-        "  font-size: 11px; }");
+        "  font-size: 11px; border-radius: 5px; }"
+        "button.keycap.rt { background-color: rgba(46,194,126,0.30); }"
+        "button.keycap.changed { font-weight: bold;"
+        "  box-shadow: inset 0 0 0 2px rgba(53,132,228,0.55); }"
+        "button.keycap.snap { border: 2px solid #e66100; }"
+        "button.keycap.pressed { background-color: rgba(53,132,228,0.75);"
+        "  color: #ffffff; }");
     gtk_style_context_add_provider_for_display(gdk_display_get_default(),
                                                GTK_STYLE_PROVIDER(provider),
                                                GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
@@ -464,16 +612,19 @@ void as_key_dialog_open(GtkWindow *parent, AsStore *store, const char *path)
     d->window = GTK_WINDOW(window);
     g_object_set_data_full(G_OBJECT(window), "as-key-dialog", d, dialog_free);
     gtk_window_set_title(d->window, "Раскладка клавиш");
+    gtk_window_set_resizable(d->window, TRUE);
     gtk_window_set_transient_for(d->window, parent);
     gtk_window_set_modal(d->window, TRUE);
-    gtk_window_set_default_size(d->window, 840, 620);
+    gtk_window_set_default_size(d->window, 920, 720);
 
     gtk_widget_set_margin_top(outer, 18);
     gtk_widget_set_margin_bottom(outer, 18);
     gtk_widget_set_margin_start(outer, 18);
     gtk_widget_set_margin_end(outer, 18);
     gtk_label_set_wrap(GTK_LABEL(description), TRUE);
+    gtk_label_set_wrap_mode(GTK_LABEL(description), PANGO_WRAP_WORD_CHAR);
     gtk_label_set_xalign(GTK_LABEL(description), 0.0);
+    gtk_label_set_ellipsize(GTK_LABEL(description), PANGO_ELLIPSIZE_NONE);
     gtk_box_append(GTK_BOX(outer), description);
 
     gtk_widget_set_size_request(fixed, KEY_WIDTH, 220);
@@ -491,6 +642,8 @@ void as_key_dialog_open(GtkWindow *parent, AsStore *store, const char *path)
         gtk_widget_set_halign(button, GTK_ALIGN_FILL);
         gtk_widget_set_valign(button, GTK_ALIGN_FILL);
         gtk_widget_add_css_class(button, "keycap");
+        gtk_widget_set_focusable(button, FALSE);
+        gtk_widget_set_tooltip_text(button, label);
         gtk_fixed_put(GTK_FIXED(fixed), button, keyboxes[i].x,
                       keyboxes[i].y);
         g_object_set_data(G_OBJECT(button), "as-pos",
@@ -499,17 +652,43 @@ void as_key_dialog_open(GtkWindow *parent, AsStore *store, const char *path)
         d->buttons[i] = button;
     }
     gtk_box_append(GTK_BOX(outer), fixed);
+    gtk_box_append(GTK_BOX(outer), make_legend());
+    {
+        GtkWidget *hint = gtk_label_new(
+            "Нажмите клавиши на клавиатуре: подсветка покажет, что нажатие "
+            "доходит, а цвета — какие настройки уже сохранены.");
 
-    gtk_box_append(GTK_BOX(select), make_button("Все", G_CALLBACK(on_select_all), d));
-    gtk_box_append(GTK_BOX(select),
-                   make_button("Буквы", G_CALLBACK(on_select_letters), d));
-    gtk_box_append(GTK_BOX(select),
-                   make_button("Цифры", G_CALLBACK(on_select_digits), d));
-    gtk_box_append(GTK_BOX(select),
-                   make_button("Спец. клавиши",
-                               G_CALLBACK(on_select_modifiers), d));
-    gtk_box_append(GTK_BOX(select),
-                   make_button("Снять", G_CALLBACK(on_select_none), d));
+        gtk_label_set_wrap(GTK_LABEL(hint), TRUE);
+        gtk_label_set_wrap_mode(GTK_LABEL(hint), PANGO_WRAP_WORD_CHAR);
+        gtk_label_set_xalign(GTK_LABEL(hint), 0.0);
+        gtk_box_append(GTK_BOX(outer), hint);
+    }
+
+    {
+        static const char *const group_names[] = { "Все", "Буквы", "Цифры",
+                                                   "Спец. клавиши" };
+        static const char *const group_hints[] = {
+            "Выбрать все клавиши; повторное нажатие снимет выбор",
+            "Выбрать все буквы; повторное нажатие снимет выбор",
+            "Выбрать все цифры; повторное нажатие снимет выбор",
+            "Модификаторы, Ctrl, Alt, Shift, Win; повторное нажатие снимает",
+        };
+
+        for (int group = 0; group < 4; group++) {
+            GtkWidget *button = gtk_toggle_button_new_with_label(
+                group_names[group]);
+
+            g_object_set_data(G_OBJECT(button), "as-group",
+                              GINT_TO_POINTER(group));
+            gtk_widget_set_tooltip_text(button, group_hints[group]);
+            g_signal_connect(button, "toggled", G_CALLBACK(on_group_toggled),
+                             d);
+            d->group_buttons[group] = button;
+            gtk_box_append(GTK_BOX(select), button);
+        }
+        gtk_box_append(GTK_BOX(select),
+                       make_button("Снять", G_CALLBACK(on_none), d));
+    }
     gtk_box_append(GTK_BOX(outer), select);
 
     {
@@ -537,15 +716,22 @@ void as_key_dialog_open(GtkWindow *parent, AsStore *store, const char *path)
                                 &d->rtr, 0.2, d);
     d->deadzone = make_slider(group, "Мёртвая зона", 0.0, 1.0, &d->dz, 0.3, d);
     d->rt = as_ui_switch_row("Rapid Trigger", NULL);
+    gtk_widget_set_tooltip_text(GTK_WIDGET(d->rt),
+                                "Rapid Trigger: клавиша отпускается сразу, "
+                                "как только ход уменьшился на заданное значение");
     adw_preferences_group_add(group, GTK_WIDGET(d->rt));
     gtk_box_append(GTK_BOX(outer), GTK_WIDGET(group));
 
     d->status = gtk_label_new("Выбрано клавиш: 0");
     gtk_label_set_xalign(GTK_LABEL(d->status), 0.0);
+    gtk_label_set_ellipsize(GTK_LABEL(d->status), PANGO_ELLIPSIZE_END);
     gtk_box_append(GTK_BOX(outer), d->status);
 
     d->apply = gtk_button_new_with_label("Применить к выбранным");
     gtk_widget_add_css_class(d->apply, "suggested-action");
+    gtk_widget_set_tooltip_text(d->apply,
+                                "Записать выбранный ход во все отмеченные "
+                                "клавиши");
     gtk_widget_set_sensitive(d->apply, FALSE);
     g_signal_connect(d->apply, "clicked", G_CALLBACK(on_apply), d);
     gtk_box_append(GTK_BOX(actions), d->apply);
@@ -554,6 +740,14 @@ void as_key_dialog_open(GtkWindow *parent, AsStore *store, const char *path)
     gtk_widget_set_halign(actions, GTK_ALIGN_END);
     gtk_box_append(GTK_BOX(outer), actions);
 
+    {
+        GtkEventController *keys = gtk_event_controller_key_new();
+
+        gtk_event_controller_set_propagation_phase(keys, GTK_PHASE_CAPTURE);
+        g_signal_connect(keys, "key-pressed", G_CALLBACK(on_test_pressed), d);
+        g_signal_connect(keys, "key-released", G_CALLBACK(on_test_released), d);
+        gtk_widget_add_controller(window, keys);
+    }
     gtk_window_set_child(d->window, outer);
     /* The page may still be waiting for the first scan; read the values now
      * and again once the store has them, and follow later writes the same

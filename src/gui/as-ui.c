@@ -102,6 +102,66 @@ void as_ui_rgb_from_rgba(const GdkRGBA *rgba, uint8_t rgb[3])
 
 /* The sensor accepts 50..30000 in steps of 50 and 30100..60000 in steps of
  * 100; anything else is rejected by the driver. */
+unsigned as_ui_hid_from_keyval(guint keyval)
+{
+    guint lower = gdk_keyval_to_lower(keyval);
+
+    if (lower >= GDK_KEY_a && lower <= GDK_KEY_z) {
+        return 4u + (lower - GDK_KEY_a);
+    }
+    if (lower >= GDK_KEY_0 && lower <= GDK_KEY_9) {
+        return lower == GDK_KEY_0 ? 39u : 30u + (lower - GDK_KEY_1);
+    }
+    if (lower >= GDK_KEY_F1 && lower <= GDK_KEY_F12) {
+        return 58u + (lower - GDK_KEY_F1);
+    }
+    switch (lower) {
+    case GDK_KEY_Return:
+    case GDK_KEY_KP_Enter: return 40;
+    case GDK_KEY_Escape: return 41;
+    case GDK_KEY_BackSpace: return 42;
+    case GDK_KEY_Tab: return 43;
+    case GDK_KEY_space: return 44;
+    case GDK_KEY_minus: return 45;
+    case GDK_KEY_equal: return 46;
+    case GDK_KEY_bracketleft: return 47;
+    case GDK_KEY_bracketright: return 48;
+    case GDK_KEY_backslash: return 49;
+    case GDK_KEY_semicolon: return 51;
+    case GDK_KEY_apostrophe: return 52;
+    case GDK_KEY_grave: return 53;
+    case GDK_KEY_comma: return 54;
+    case GDK_KEY_period: return 55;
+    case GDK_KEY_slash: return 56;
+    case GDK_KEY_Caps_Lock: return 57;
+    case GDK_KEY_Print: return 70;
+    case GDK_KEY_Scroll_Lock: return 71;
+    case GDK_KEY_Pause: return 72;
+    case GDK_KEY_Insert: return 73;
+    case GDK_KEY_Home: return 74;
+    case GDK_KEY_Page_Up: return 75;
+    case GDK_KEY_Delete: return 76;
+    case GDK_KEY_End: return 77;
+    case GDK_KEY_Page_Down: return 78;
+    case GDK_KEY_Right: return 79;
+    case GDK_KEY_Left: return 80;
+    case GDK_KEY_Down: return 81;
+    case GDK_KEY_Up: return 82;
+    case GDK_KEY_Num_Lock: return 83;
+    case GDK_KEY_KP_Divide: return 84;
+    case GDK_KEY_Control_L: return 224;
+    case GDK_KEY_Shift_L: return 225;
+    case GDK_KEY_Alt_L: return 226;
+    case GDK_KEY_Super_L: return 227;
+    case GDK_KEY_Control_R: return 228;
+    case GDK_KEY_Shift_R: return 229;
+    case GDK_KEY_Alt_R: return 230;
+    case GDK_KEY_Super_R: return 231;
+    default:
+        return 0;
+    }
+}
+
 unsigned as_ui_snap_dpi(unsigned dpi)
 {
     unsigned v;
@@ -187,15 +247,20 @@ typedef struct {
     void (*changed)(gpointer);
     gpointer user_data;
     GtkScale *scale;
+    GtkLabel *label;
     AdwActionRow *row;
 } SliderData;
 
 static void slider_show(SliderData *s)
 {
-    char buf[32];
+    char buf[32], hint[96];
 
     g_snprintf(buf, sizeof(buf), "%.2f мм", *s->value);
-    adw_action_row_set_subtitle(s->row, buf);
+    gtk_label_set_text(s->label, buf);
+    g_snprintf(hint, sizeof(hint), "%s: %.2f мм, диапазон %.2f–%.2f мм",
+               adw_preferences_row_get_title(ADW_PREFERENCES_ROW(s->row)),
+               *s->value, s->min, s->max);
+    gtk_widget_set_tooltip_text(GTK_WIDGET(s->row), hint);
     if (gtk_range_get_value(GTK_RANGE(s->scale)) != *s->value) {
         gtk_range_set_value(GTK_RANGE(s->scale), *s->value);
     }
@@ -257,6 +322,7 @@ AdwActionRow *as_ui_slider_row(const char *title, double min, double max,
     GtkWidget *box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
     GtkWidget *minus = gtk_button_new_from_icon_name("value-decrease-symbolic");
     GtkWidget *plus = gtk_button_new_from_icon_name("value-increase-symbolic");
+    GtkWidget *value_label = gtk_label_new("");
 
     s->min = min;
     s->max = max;
@@ -275,7 +341,9 @@ AdwActionRow *as_ui_slider_row(const char *title, double min, double max,
 
     s->scale = GTK_SCALE(gtk_scale_new_with_range(GTK_ORIENTATION_HORIZONTAL,
                                                   min, max, step));
-    gtk_widget_set_size_request(GTK_WIDGET(s->scale), 220, -1);
+    s->label = GTK_LABEL(value_label);
+    gtk_label_set_width_chars(s->label, 7);
+    gtk_widget_set_size_request(GTK_WIDGET(s->scale), 160, -1);
     gtk_scale_set_draw_value(s->scale, FALSE);
     gtk_widget_set_valign(GTK_WIDGET(s->scale), GTK_ALIGN_CENTER);
     g_object_set_data(G_OBJECT(minus), "as-delta", GINT_TO_POINTER(-1));
@@ -288,6 +356,7 @@ AdwActionRow *as_ui_slider_row(const char *title, double min, double max,
 
     gtk_box_append(GTK_BOX(box), minus);
     gtk_box_append(GTK_BOX(box), GTK_WIDGET(s->scale));
+    gtk_box_append(GTK_BOX(box), value_label);
     gtk_box_append(GTK_BOX(box), plus);
     gtk_widget_set_valign(box, GTK_ALIGN_CENTER);
     adw_action_row_add_suffix(row, box);

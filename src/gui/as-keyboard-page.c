@@ -455,12 +455,13 @@ static void on_snap_control(GtkWidget *widget, GParamSpec *pspec, gpointer data)
  * mapped to a HID usage through the X11 keycode, the same way the kernel
  * reports it, so the user's layout does not matter. */
 static int key_pos_from_code(const AsDevice *p_dev, const int *positions,
-                             int count, int xcode)
+                             int count, int code)
 {
+    if (!code) {
+        return -1;
+    }
     for (int i = 0; i < count; i++) {
-        unsigned code = p_dev->key_code[positions[i]];
-
-        if (code < 0x10000 && (int)code + 8 == xcode) {
+        if ((int)p_dev->key_code[positions[i]] == code) {
             return positions[i];
         }
     }
@@ -479,12 +480,13 @@ static gboolean on_snap_capture(GtkEventControllerKey *controller,
                                                         "as-second"));
     int pos;
 
-    (void)keyval;
+    (void)keycode;
     (void)state;
-    if (!dev || p->key_count == 0 || keycode == 0) {
+    if (!dev || p->key_count == 0) {
         return FALSE;
     }
-    pos = key_pos_from_code(dev, p->key_positions, p->key_count, (int)keycode + 8);
+    pos = key_pos_from_code(dev, p->key_positions, p->key_count,
+                            (int)as_ui_hid_from_keyval(keyval));
     if (pos < 0) {
         return FALSE;
     }
