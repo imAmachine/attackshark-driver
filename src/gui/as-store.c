@@ -479,11 +479,17 @@ static int apply_keyboard(struct as_keyboard *kb, const AsOpRequest *req)
                                       req->release, req->rt_press,
                                       req->rt_release, req->deadzone);
     case AS_OP_KB_SIDE_LIGHT:
-    case AS_OP_KB_LIGHT:
         request_light(req, &light);
-        return req->op == AS_OP_KB_LIGHT ? as_keyboard_set_light(kb, &light)
-                                         : as_keyboard_set_sidelight(kb,
-                                                                     &light);
+        return as_keyboard_set_sidelight(kb, &light);
+    case AS_OP_KB_LIGHT:
+        if (req->light_mode == 0) {
+            return as_keyboard_set_light_power(kb, 0);
+        }
+        request_light(req, &light);
+        if (as_keyboard_set_light(kb, &light) < 0) {
+            return -EIO;
+        }
+        return as_keyboard_set_light_power(kb, 1);
     default:
         return -EINVAL;
     }
@@ -548,6 +554,7 @@ static void apply_optimistic(AsDevice *dev, const AsOpRequest *req)
         break;
     case AS_OP_KB_LIGHT:
         dev->light_valid = 1;
+        dev->light_on = req->light_mode != 0;
         dev->light_mode = req->light_mode;
         dev->light_speed = req->light_speed;
         dev->light_brightness = req->light_brightness;
