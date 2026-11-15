@@ -18,6 +18,10 @@ typedef struct {
     int x, y, w, h;
 } KeyBox;
 
+#define KEY_GAP 6
+#define KEY_HEIGHT 40
+#define KEY_WIDTH 750
+
 static const KeyBox keyboxes[] = {
     { 1, 0x00000029, 0, 0, 40, 40 },      /* Esc */
     { 7, 0x0000001e, 45, 0, 40, 40 },     /* 1 */
@@ -315,6 +319,26 @@ static void dialog_free(gpointer data)
     g_free(data);
 }
 
+static void load_css(void)
+{
+    static gboolean loaded;
+    GtkCssProvider *provider;
+
+    if (loaded) {
+        return;
+    }
+    loaded = TRUE;
+    provider = gtk_css_provider_new();
+    gtk_css_provider_load_from_string(
+        provider,
+        "button.keycap { min-height: 0; min-width: 0; padding: 0 2px;"
+        "  font-size: 11px; }");
+    gtk_style_context_add_provider_for_display(gdk_display_get_default(),
+                                               GTK_STYLE_PROVIDER(provider),
+                                               GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
+    g_object_unref(provider);
+}
+
 void as_key_dialog_open(GtkWindow *parent, AsStore *store, const char *path)
 {
     KeyDialog *d = g_new0(KeyDialog, 1);
@@ -331,6 +355,7 @@ void as_key_dialog_open(GtkWindow *parent, AsStore *store, const char *path)
 
     d->store = store;
     g_strlcpy(d->path, path, sizeof(d->path));
+    load_css();
     d->window = GTK_WINDOW(window);
     g_object_set_data_full(G_OBJECT(window), "as-key-dialog", d, dialog_free);
     gtk_window_set_title(d->window, "Раскладка клавиш");
@@ -346,15 +371,23 @@ void as_key_dialog_open(GtkWindow *parent, AsStore *store, const char *path)
     gtk_label_set_xalign(GTK_LABEL(description), 0.0);
     gtk_box_append(GTK_BOX(outer), description);
 
-    gtk_widget_set_size_request(fixed, 750, 220);
+    gtk_widget_set_size_request(fixed, KEY_WIDTH, 220);
     gtk_widget_set_halign(fixed, GTK_ALIGN_CENTER);
     for (size_t i = 0; i < G_N_ELEMENTS(keyboxes); i++) {
         char label[16];
         GtkWidget *button = gtk_toggle_button_new_with_label(
             short_key_name(keyboxes[i].code, label, sizeof(label)));
 
-        gtk_widget_set_size_request(button, keyboxes[i].w, 38);
-        gtk_fixed_put(GTK_FIXED(fixed), button, keyboxes[i].x, keyboxes[i].y);
+        /* GtkFixed places widgets at their natural size, so the gaps between
+         * the vendor coordinates are folded into each key instead. */
+        gtk_widget_set_size_request(button, keyboxes[i].w - KEY_GAP,
+                                    KEY_HEIGHT - KEY_GAP);
+        gtk_widget_set_hexpand(button, FALSE);
+        gtk_widget_set_halign(button, GTK_ALIGN_FILL);
+        gtk_widget_set_valign(button, GTK_ALIGN_FILL);
+        gtk_widget_add_css_class(button, "keycap");
+        gtk_fixed_put(GTK_FIXED(fixed), button, keyboxes[i].x,
+                      keyboxes[i].y);
         g_object_set_data(G_OBJECT(button), "as-pos",
                           GINT_TO_POINTER(keyboxes[i].pos));
         g_signal_connect(button, "toggled", G_CALLBACK(on_key_toggled), d);
