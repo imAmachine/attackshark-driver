@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
-#include "attackshark.h"
+#define _GNU_SOURCE
+#include "internal.h"
 
 #include <errno.h>
 #include <stdlib.h>
@@ -25,22 +26,15 @@ const char *as_strerror(int err)
 
 /* Vendor collections: usage page 0xFF02 on Compx mice and 0xFFFF/usage 2 on
  * Royuan HE keyboards. Bluetooth HID links carry neither. */
-static const unsigned char mouse_vendor_probe[] = { 0x06, 0x02, 0xff };
-static const unsigned char keyboard_vendor_probe[] = { 0x06, 0xff, 0xff,
-                                                      0x09, 0x02 };
+static const unsigned char mouse_vendor[] = { 0x06, 0x02, 0xff };
+static const unsigned char keyboard_vendor[] = { 0x06, 0xff, 0xff, 0x09, 0x02 };
 
-static int descriptor_has(const struct as_hid *dev,
-                          const unsigned char *needle, size_t len)
+int as_hid_desc_has(const struct as_hid *dev, const void *needle, size_t len)
 {
     if (!dev || dev->descriptor_len < len) {
         return 0;
     }
-    for (size_t i = 0; i + len <= dev->descriptor_len; i++) {
-        if (memcmp(dev->descriptor + i, needle, len) == 0) {
-            return 1;
-        }
-    }
-    return 0;
+    return memmem(dev->descriptor, dev->descriptor_len, needle, len) != NULL;
 }
 
 int as_hid_is_bluetooth(const struct as_hid *dev)
@@ -60,9 +54,8 @@ int as_hid_is_keyboard(const struct as_hid *dev)
 
 int as_hid_has_vendor(const struct as_hid *dev)
 {
-    return descriptor_has(dev, mouse_vendor_probe, sizeof(mouse_vendor_probe)) ||
-           descriptor_has(dev, keyboard_vendor_probe,
-                          sizeof(keyboard_vendor_probe));
+    return as_hid_desc_has(dev, mouse_vendor, sizeof(mouse_vendor)) ||
+           as_hid_desc_has(dev, keyboard_vendor, sizeof(keyboard_vendor));
 }
 
 /* Shared by the CLI and the GUI: the index is the same value the vendor
@@ -77,22 +70,19 @@ static const char *const light_modes[] = {
 
 int as_light_mode_count(void)
 {
-    return (int)(sizeof(light_modes) / sizeof(light_modes[0]));
+    return (int)AS_N(light_modes);
 }
 
 const char *as_light_mode_name(int mode)
 {
-    if (mode >= 0 && (size_t)mode < sizeof(light_modes) / sizeof(light_modes[0])) {
-        return light_modes[mode];
-    }
-    return "unknown";
+    return mode >= 0 && (size_t)mode < AS_N(light_modes) ? light_modes[mode]
+                                                        : "unknown";
 }
 
 int as_light_mode_by_name(const char *name)
 {
     char *end;
     long v;
-    int n = as_light_mode_count();
 
     if (!name) {
         return -1;
@@ -101,9 +91,9 @@ int as_light_mode_by_name(const char *name)
     if (end != name && *end == 0) {
         return (int)v;
     }
-    for (int i = 0; i < n; i++) {
+    for (size_t i = 0; i < AS_N(light_modes); i++) {
         if (strcmp(name, light_modes[i]) == 0) {
-            return i;
+            return (int)i;
         }
     }
     return -1;

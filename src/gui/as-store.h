@@ -28,7 +28,6 @@ typedef struct {
     char product[64];
     unsigned vid;
     unsigned pid;
-    int iface;
     char error[160];
     /* The node exists but this user may not open it: installing the udev
      * rules is the fix, so the window offers it instead of a dead end. */
@@ -49,17 +48,12 @@ typedef struct {
     int motion_sync;
     int angle_snap;
     int ripple;
-    int sleep_time;
     int profile;
     int fw_valid;
     int fw_major;
     int fw_minor;
     int dongle_valid;
     int dongle[3];
-    int light_mode;
-    int light_brightness;
-    int light_speed;
-    uint8_t rgb[3];
 
     /* keyboard */
     int usb_version_valid;
@@ -67,8 +61,6 @@ typedef struct {
     int revision_valid;
     int revision;
     int mag_mode;
-    int light_opt;
-    int light_dazzle;
     int side_light_valid;
     int side_light_mode;
     int side_light_speed;
@@ -113,12 +105,10 @@ typedef struct {
 AsStore *as_store_get(void);
 /* Runs in the worker thread; the UI gets "changed" when the data is ready. */
 void as_store_scan(AsStore *self);
-void as_store_refresh(AsStore *self, const char *path);
 gboolean as_store_busy(AsStore *self);
 
 GPtrArray *as_store_devices(AsStore *self);
 AsDevice *as_store_lookup(AsStore *self, const char *path);
-guint as_store_count(AsStore *self);
 /* TRUE when at least one device is present but not readable by this user. */
 gboolean as_store_permissions_denied(AsStore *self);
 /* Installs the udev rules on the worker thread and rescans afterwards. Only

@@ -1,7 +1,11 @@
 // SPDX-License-Identifier: MIT
 #include "as-ui.h"
 
+#include <stdarg.h>
+#include <stdio.h>
 #include <string.h>
+
+#define WRITE_DELAY_MS 350
 
 static const int rates[] = { 125, 250, 500, 1000, 2000, 4000, 8000 };
 
@@ -11,6 +15,7 @@ GtkStringList *as_ui_rate_list(void)
 
     for (size_t i = 0; i < G_N_ELEMENTS(rates); i++) {
         char buf[32];
+
         snprintf(buf, sizeof(buf), "%d Hz", rates[i]);
         gtk_string_list_append(list, buf);
     }
@@ -29,10 +34,7 @@ int as_ui_rate_to_index(int hz)
 
 int as_ui_rate_from_index(guint index)
 {
-    if (index < G_N_ELEMENTS(rates)) {
-        return rates[index];
-    }
-    return -1;
+    return index < G_N_ELEMENTS(rates) ? rates[index] : -1;
 }
 
 GtkStringList *as_ui_light_list_for(int side, int *modes, int max)
@@ -75,10 +77,8 @@ const char *as_ui_mag_mode_name(int mode)
     static const char *const names[] = { "comfort", "sensitive", "gaming",
                                         "custom" };
 
-    if (mode >= 0 && mode < (int)G_N_ELEMENTS(names)) {
-        return names[mode];
-    }
-    return "custom";
+    return mode >= 0 && mode < (int)G_N_ELEMENTS(names) ? names[mode]
+                                                       : "custom";
 }
 
 int as_ui_mag_mode_count(void)
@@ -136,6 +136,17 @@ void as_ui_row_set_value(AdwActionRow *row, const char *value)
     adw_action_row_set_subtitle(row, value);
 }
 
+void as_ui_row_format(AdwActionRow *row, const char *fmt, ...)
+{
+    char buf[192];
+    va_list ap;
+
+    va_start(ap, fmt);
+    vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+    adw_action_row_set_subtitle(row, buf);
+}
+
 AdwSwitchRow *as_ui_switch_row(const char *title, const char *subtitle)
 {
     AdwSwitchRow *row = ADW_SWITCH_ROW(adw_switch_row_new());
@@ -147,46 +158,76 @@ AdwSwitchRow *as_ui_switch_row(const char *title, const char *subtitle)
     return row;
 }
 
+AdwPreferencesGroup *as_ui_group(const char *title, const char *description)
+{
+    AdwPreferencesGroup *group =
+        ADW_PREFERENCES_GROUP(adw_preferences_group_new());
+
+    adw_preferences_group_set_title(group, title);
+    if (description) {
+        adw_preferences_group_set_description(group, description);
+    }
+    return group;
+}
+
+AdwComboRow *as_ui_combo(const char *title, GListModel *model)
+{
+    AdwComboRow *row = ADW_COMBO_ROW(adw_combo_row_new());
+
+    adw_preferences_row_set_title(ADW_PREFERENCES_ROW(row), title);
+    adw_combo_row_set_model(row, model);
+    return row;
+}
+
+AdwSpinRow *as_ui_spin(const char *title, double min, double max, double step,
+                       const char *subtitle)
+{
+    AdwSpinRow *row = ADW_SPIN_ROW(adw_spin_row_new_with_range(min, max, step));
+
+    adw_preferences_row_set_title(ADW_PREFERENCES_ROW(row), title);
+    adw_spin_row_set_digits(row, 0);
+    if (subtitle) {
+        adw_action_row_set_subtitle(ADW_ACTION_ROW(row), subtitle);
+    }
+    return row;
+}
+
 /* The guard must be restored, not cleared: the setter is normally called from
  * update_page(), which already holds it. Clearing it there let the following
  * programmatic changes look like user input and write to the device. */
+#define GUARDED(guard, statement)                                              \
+    G_STMT_START                                                               \
+    {                                                                          \
+        gboolean previous__ = *(guard);                                        \
+        *(guard) = TRUE;                                                       \
+        statement;                                                             \
+        *(guard) = previous__;                                                 \
+    }                                                                          \
+    G_STMT_END
+
 void as_ui_combo_set(AdwComboRow *row, gboolean *guard, int index)
 {
-    gboolean previous = *guard;
-
-    *guard = TRUE;
-    adw_combo_row_set_selected(row, index >= 0 ? (guint)index
-                                               : GTK_INVALID_LIST_POSITION);
-    *guard = previous;
+    GUARDED(guard, adw_combo_row_set_selected(
+                       row, index >= 0 ? (guint)index
+                                       : GTK_INVALID_LIST_POSITION));
 }
 
 void as_ui_spin_set(AdwSpinRow *row, gboolean *guard, double value)
 {
-    gboolean previous = *guard;
-
-    *guard = TRUE;
-    adw_spin_row_set_value(row, value);
-    *guard = previous;
+    GUARDED(guard, adw_spin_row_set_value(row, value));
 }
 
 void as_ui_switch_set(AdwSwitchRow *row, gboolean *guard, gboolean active)
 {
-    gboolean previous = *guard;
-
-    *guard = TRUE;
-    adw_switch_row_set_active(row, active);
-    *guard = previous;
+    GUARDED(guard, adw_switch_row_set_active(row, active));
 }
 
 void as_ui_color_set(GtkColorDialogButton *button, gboolean *guard,
                      const uint8_t rgb[3])
 {
-    gboolean previous = *guard;
     GdkRGBA rgba = as_ui_rgba_from_rgb(rgb);
 
-    *guard = TRUE;
-    gtk_color_dialog_button_set_rgba(button, &rgba);
-    *guard = previous;
+    GUARDED(guard, gtk_color_dialog_button_set_rgba(button, &rgba));
 }
 
 const char *as_ui_error(const AsDevice *dev)
@@ -205,8 +246,7 @@ char *as_ui_mouse_summary(const AsDevice *dev)
         g_string_append(s, as_ui_error(dev));
         return g_string_free(s, FALSE);
     }
-    g_string_append(s, dev->online ? "связь есть"
-                                  : "спит или выключена");
+    g_string_append(s, dev->online ? "связь есть" : "спит или выключена");
     if (dev->battery > 0) {
         g_string_append_printf(s, " · заряд %d%%", dev->battery);
     }
@@ -235,4 +275,74 @@ char *as_ui_keyboard_summary(const AsDevice *dev)
         g_string_append_printf(s, " · %s", as_ui_mag_mode_name(dev->mag_mode));
     }
     return g_string_free(s, FALSE);
+}
+
+/* --------------------------- device pages --------------------------- */
+
+static gboolean pending_timeout(gpointer data)
+{
+    AsPage *page = data;
+
+    page->pending_id = 0;
+    as_page_flush(page);
+    return G_SOURCE_REMOVE;
+}
+
+void as_page_flush(AsPage *page)
+{
+    if (page->pending_id) {
+        g_source_remove(page->pending_id);
+        page->pending_id = 0;
+    }
+    if (page->pending_valid) {
+        page->pending_valid = FALSE;
+        as_store_apply(page->store, page->path, &page->pending);
+    }
+}
+
+void as_page_queue(AsPage *page, const AsOpRequest *req)
+{
+    page->pending = *req;
+    page->pending_valid = TRUE;
+    if (page->pending_id) {
+        g_source_remove(page->pending_id);
+    }
+    page->pending_id = g_timeout_add(WRITE_DELAY_MS, pending_timeout, page);
+}
+
+void as_page_free(AsPage *page)
+{
+    as_page_flush(page);
+    g_free(page->path);
+    g_free(page);
+}
+
+AsDevice *as_page_device(AsPage *page)
+{
+    return as_store_lookup(page->store, page->path);
+}
+
+void as_page_banner(AsPage *page, const char *text)
+{
+    if (text) {
+        adw_banner_set_title(page->banner, text);
+    }
+    adw_banner_set_revealed(page->banner, text != NULL);
+}
+
+void as_page_attach(AsPage *page, GtkWidget *box, AdwPreferencesPage *prefs,
+                    AsStore *store, const char *path)
+{
+    page->store = store;
+    page->path = g_strdup(path);
+    page->banner = ADW_BANNER(adw_banner_new(""));
+    adw_banner_set_revealed(page->banner, FALSE);
+
+    gtk_box_append(GTK_BOX(box), GTK_WIDGET(page->banner));
+    gtk_box_append(GTK_BOX(box), GTK_WIDGET(prefs));
+    gtk_widget_set_vexpand(GTK_WIDGET(prefs), TRUE);
+
+    g_object_set_data(G_OBJECT(box), "as-page", page);
+    g_object_set_data_full(G_OBJECT(box), "as-page-data", page,
+                           (GDestroyNotify)as_page_free);
 }

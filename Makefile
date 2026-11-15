@@ -39,7 +39,6 @@ POLKITDIR  ?= /usr/share/polkit-1/actions
 .PHONY: all gui clean install install-gui uninstall check test test-store compiledb
 
 STORE_TEST_SRC := tests/test_gui_store.c src/gui/as-store.c src/gui/as-worker.c
-STORE_TEST_OBJ := $(STORE_TEST_SRC:.c=.o)
 
 all: $(BIN) $(if $(HAVE_GTK),$(GUI))
 
@@ -57,7 +56,7 @@ $(GUI): $(GUI_OBJ) $(LIB)
 src/gui/%.o: src/gui/%.c include/attackshark.h
 	$(CC) $(CPPFLAGS) $(GUI_CFLAGS) $(CFLAGS) -c -o $@ $<
 
-%.o: %.c include/attackshark.h
+%.o: %.c include/attackshark.h src/internal.h
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
 
 install: $(BIN)

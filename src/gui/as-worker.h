@@ -18,9 +18,6 @@ typedef void (*AsJobFreeFunc)(gpointer data);
 
 void as_worker_start(void);
 void as_worker_stop(void);
-/* Number of jobs queued or running. */
-guint as_worker_pending(void);
-
 void as_job_run(AsJobFunc func, gpointer data, AsJobFreeFunc free_data,
                 AsJobDoneFunc done, gpointer user_data,
                 AsJobFreeFunc free_user_data);

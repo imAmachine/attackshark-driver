@@ -24,7 +24,6 @@ typedef struct {
     int opened;
     unsigned vid;
     unsigned pid;
-    int iface;
     char path[64];
     struct as_mouse mouse;
     struct as_keyboard kb;
@@ -65,7 +64,6 @@ static Handle *handle_new(const struct as_hid *hid)
     h->kind = (AsDeviceKind)classify(hid);
     h->vid = hid->vid;
     h->pid = hid->pid;
-    h->iface = hid->iface;
     h->mouse.hid.fd = -1;
     h->kb.hid.fd = -1;
     h->kb.analog.fd = -1;
@@ -94,6 +92,8 @@ static void handle_destroy(gpointer data)
     g_free(h);
 }
 
+/* The driver enumerates the family, so a node found by path may still open
+ * another interface of the same device: only the exact node is accepted. */
 static int handle_open(Handle *h)
 {
     int rc;
@@ -128,34 +128,40 @@ static int handle_open(Handle *h)
 static void handles_prune(GHashTable *handles, GHashTable *present)
 {
     GHashTableIter iter;
-    gpointer key, value;
-    GPtrArray *gone = g_ptr_array_new();
+    gpointer key;
 
     g_hash_table_iter_init(&iter, handles);
-    while (g_hash_table_iter_next(&iter, &key, &value)) {
+    while (g_hash_table_iter_next(&iter, &key, NULL)) {
         if (!g_hash_table_contains(present, key)) {
-            g_ptr_array_add(gone, g_strdup(key));
+            g_hash_table_iter_remove(&iter);
         }
     }
-    for (guint i = 0; i < gone->len; i++) {
-        g_hash_table_remove(handles, gone->pdata[i]);
-    }
-    g_ptr_array_free(gone, TRUE);
 }
 
 /* --------------------------- snapshot filling -------------------------- */
 
-static void fill_identity(AsDevice *dev, const struct as_hid *hid, int kind)
+static void fill_identity(AsDevice *dev, const Handle *h)
 {
-    dev->kind = (AsDeviceKind)kind;
-    g_strlcpy(dev->path, hid->path, sizeof(dev->path));
-    dev->vid = hid->vid;
-    dev->pid = hid->pid;
-    dev->iface = hid->iface;
-    if (kind == AS_DEVICE_MOUSE) {
-        g_strlcpy(dev->product, as_mouse_model_name(hid->pid), sizeof(dev->product));
+    dev->kind = h->kind;
+    g_strlcpy(dev->path, h->path, sizeof(dev->path));
+    dev->vid = h->vid;
+    dev->pid = h->pid;
+    if (h->kind == AS_DEVICE_MOUSE) {
+        g_strlcpy(dev->product, as_mouse_model_name(h->pid),
+                  sizeof(dev->product));
     } else {
         g_strlcpy(dev->product, "R85 HE", sizeof(dev->product));
+    }
+}
+
+/* A failed read is not fatal: the node may be gone (handled by reopening on
+ * the next scan) or root-owned, which the window can fix. */
+static void fill_error(AsDevice *dev, Handle *h, int rc)
+{
+    snprintf(dev->error, sizeof(dev->error), "%s", as_strerror(rc));
+    dev->permission_denied = rc == -EACCES;
+    if (rc == -ENODEV || rc == -EIO) {
+        handle_close(h);
     }
 }
 
@@ -163,45 +169,37 @@ static void fill_mouse(Handle *h, AsDevice *dev)
 {
     struct as_mouse_state st;
     int rc = as_mouse_read_state(&h->mouse, &st);
+    int valid;
 
     if (rc < 0) {
-        snprintf(dev->error, sizeof(dev->error), "%s", as_strerror(rc));
-        dev->permission_denied = rc == -EACCES;
-        if (rc == -ENODEV || rc == -EIO) {
-            handle_close(h);
-        }
+        fill_error(dev, h, rc);
         return;
     }
-
+    valid = st.config_valid;
     dev->online = st.online;
-    dev->config_valid = st.config_valid;
+    dev->config_valid = valid;
     dev->charging = st.charging;
     dev->battery = st.battery;
     dev->voltage = st.battery_voltage;
-    dev->rate = st.config_valid ? st.report_rate : -1;
+    dev->rate = valid ? st.report_rate : -1;
     dev->dpi_stages = st.dpi_stages;
     dev->active_stage = st.active_dpi_stage;
     for (int i = 0; i < st.dpi_stages && i < AS_MAX_DPI_STAGES; i++) {
-        dev->dpi[i] = st.dpi[i][0];
+        dev->dpi[i] = st.dpi[i];
     }
-    dev->lod = st.config_valid ? st.lod : -1;
-    dev->debounce = st.config_valid ? st.debounce : -1;
-    dev->motion_sync = st.config_valid ? st.motion_sync : -1;
-    dev->angle_snap = st.config_valid ? st.angle_snap : -1;
-    dev->ripple = st.config_valid ? st.ripple : -1;
-    dev->sleep_time = st.config_valid ? st.sleep_time : -1;
-    dev->profile = st.config_valid ? st.profile : -1;
+    dev->lod = valid ? st.lod : -1;
+    dev->debounce = valid ? st.debounce : -1;
+    dev->motion_sync = valid ? st.motion_sync : -1;
+    dev->angle_snap = valid ? st.angle_snap : -1;
+    dev->ripple = valid ? st.ripple : -1;
+    dev->profile = valid ? st.profile : -1;
     dev->fw_valid = st.version_valid;
     dev->fw_major = st.version_major;
     dev->fw_minor = st.version_minor;
     dev->dongle_valid = st.dongle_version_valid;
     memcpy(dev->dongle, st.dongle_version, sizeof(dev->dongle));
-    dev->light_mode = st.light_mode;
-    dev->light_brightness = st.light_brightness;
-    dev->light_speed = st.light_speed;
-    memcpy(dev->rgb, st.light_color, sizeof(dev->rgb));
-    if (!st.config_valid && !st.online) {
-        /* Not an error: the mouse is asleep or switched off. */
+    /* Not an error: the mouse is asleep or switched off. */
+    if (!valid && !st.online) {
         dev->error[0] = 0;
     }
 }
@@ -212,14 +210,9 @@ static void fill_keyboard(Handle *h, AsDevice *dev)
     int rc = as_keyboard_read_state(&h->kb, &st);
 
     if (rc < 0) {
-        snprintf(dev->error, sizeof(dev->error), "%s", as_strerror(rc));
-        dev->permission_denied = rc == -EACCES;
-        if (rc == -ENODEV || rc == -EIO) {
-            handle_close(h);
-        }
+        fill_error(dev, h, rc);
         return;
     }
-
     dev->usb_version_valid = st.usb_version_valid;
     dev->usb_version = st.usb_version;
     dev->revision_valid = st.revision_valid;
@@ -240,16 +233,6 @@ static void fill_keyboard(Handle *h, AsDevice *dev)
         dev->side_rgb[0] = st.side_light.r;
         dev->side_rgb[1] = st.side_light.g;
         dev->side_rgb[2] = st.side_light.b;
-    }
-    if (st.light.valid) {
-        dev->light_mode = st.light.mode;
-        dev->light_speed = st.light.speed;
-        dev->light_brightness = st.light.brightness;
-        dev->light_dazzle = st.light.dazzle;
-        dev->light_opt = st.light.option;
-        dev->rgb[0] = st.light.r;
-        dev->rgb[1] = st.light.g;
-        dev->rgb[2] = st.light.b;
     }
 }
 
@@ -272,18 +255,12 @@ static void refresh_job_free(gpointer data)
     g_free(job);
 }
 
-static void refresh_one(AsStore *self, const struct as_hid *hid, int kind,
-                        GPtrArray *out)
+static void refresh_handle(Handle *h, GPtrArray *out)
 {
-    Handle *h = g_hash_table_lookup(self->handles, hid->path);
     AsDevice *dev = g_new0(AsDevice, 1);
     int rc;
 
-    fill_identity(dev, hid, kind);
-    if (!h) {
-        h = handle_new(hid);
-        g_hash_table_insert(self->handles, g_strdup(hid->path), h);
-    }
+    fill_identity(dev, h);
     rc = handle_open(h);
     if (rc < 0) {
         snprintf(dev->error, sizeof(dev->error), "%s", as_strerror(rc));
@@ -303,18 +280,12 @@ static void refresh_job_run(gpointer data, GError **error)
 
     if (job->only_path) {
         Handle *h = g_hash_table_lookup(job->store->handles, job->only_path);
-        if (!h) {
+
+        if (h) {
+            refresh_handle(h, out);
+        } else {
             g_set_error(error, G_IO_ERROR, G_IO_ERROR_NOT_FOUND,
                         "device %s is not connected", job->only_path);
-        } else {
-            struct as_hid hid;
-            memset(&hid, 0, sizeof(hid));
-            hid.fd = -1;
-            g_strlcpy(hid.path, h->path, sizeof(hid.path));
-            hid.vid = h->vid;
-            hid.pid = h->pid;
-            hid.iface = h->iface;
-            refresh_one(job->store, &hid, h->kind, out);
         }
     } else {
         struct as_hid found[16];
@@ -324,12 +295,15 @@ static void refresh_job_run(gpointer data, GError **error)
         int n = as_hid_list_devices(found, 16);
 
         for (int i = 0; i < n; i++) {
-            int kind = classify(&found[i]);
-            if (kind < 0) {
-                continue;
+            Handle *h = g_hash_table_lookup(job->store->handles, found[i].path);
+
+            if (!h) {
+                h = handle_new(&found[i]);
+                g_hash_table_insert(job->store->handles,
+                                    g_strdup(found[i].path), h);
             }
             g_hash_table_add(present, found[i].path);
-            refresh_one(job->store, &found[i], kind, out);
+            refresh_handle(h, out);
         }
         handles_prune(job->store->handles, present);
         g_hash_table_destroy(present);
@@ -355,6 +329,7 @@ static void store_merge(AsStore *self, GPtrArray *fresh)
     /* Devices that disappeared are not referenced by the new array anymore. */
     for (guint i = 0; i < self->devices->len; i++) {
         AsDevice *old = self->devices->pdata[i];
+
         if (!g_ptr_array_find(next, old, NULL)) {
             g_free(old);
         }
@@ -444,6 +419,20 @@ static int apply_mouse(struct as_mouse *mouse, const AsOpRequest *req)
     }
 }
 
+static void request_light(const AsOpRequest *req, struct as_kb_light *light)
+{
+    memset(light, 0, sizeof(*light));
+    light->valid = 1;
+    light->mode = (uint8_t)req->light_mode;
+    light->speed = req->light_speed;
+    light->brightness = req->light_brightness;
+    light->option = req->light_option;
+    light->dazzle = req->light_dazzle;
+    light->r = req->rgb[0];
+    light->g = req->rgb[1];
+    light->b = req->rgb[2];
+}
+
 static int apply_keyboard(struct as_keyboard *kb, const AsOpRequest *req)
 {
     struct as_kb_light light;
@@ -458,29 +447,11 @@ static int apply_keyboard(struct as_keyboard *kb, const AsOpRequest *req)
     case AS_OP_KB_MAG_MODE:
         return as_keyboard_set_mag_mode(kb, req->value);
     case AS_OP_KB_SIDE_LIGHT:
-        memset(&light, 0, sizeof(light));
-        light.valid = 1;
-        light.mode = (uint8_t)req->light_mode;
-        light.speed = req->light_speed;
-        light.brightness = req->light_brightness;
-        light.option = req->light_option;
-        light.dazzle = req->light_dazzle;
-        light.r = req->rgb[0];
-        light.g = req->rgb[1];
-        light.b = req->rgb[2];
-        return as_keyboard_set_sidelight(kb, &light);
     case AS_OP_KB_LIGHT:
-        memset(&light, 0, sizeof(light));
-        light.valid = 1;
-        light.mode = (uint8_t)req->light_mode;
-        light.speed = req->light_speed;
-        light.brightness = req->light_brightness;
-        light.option = req->light_option;
-        light.dazzle = req->light_dazzle;
-        light.r = req->rgb[0];
-        light.g = req->rgb[1];
-        light.b = req->rgb[2];
-        return as_keyboard_set_light(kb, &light);
+        request_light(req, &light);
+        return req->op == AS_OP_KB_LIGHT ? as_keyboard_set_light(kb, &light)
+                                         : as_keyboard_set_sidelight(kb,
+                                                                     &light);
     default:
         return -EINVAL;
     }
@@ -499,13 +470,15 @@ static void apply_job_run(gpointer data, GError **error)
     }
     rc = handle_open(h);
     if (rc < 0) {
-        g_set_error(error, G_IO_ERROR, G_IO_ERROR_FAILED, "%s", as_strerror(rc));
+        g_set_error(error, G_IO_ERROR, G_IO_ERROR_FAILED, "%s",
+                    as_strerror(rc));
         return;
     }
     rc = h->kind == AS_DEVICE_MOUSE ? apply_mouse(&h->mouse, &job->req)
                                     : apply_keyboard(&h->kb, &job->req);
     if (rc < 0) {
-        g_set_error(error, G_IO_ERROR, G_IO_ERROR_FAILED, "%s", as_strerror(rc));
+        g_set_error(error, G_IO_ERROR, G_IO_ERROR_FAILED, "%s",
+                    as_strerror(rc));
         if (rc == -ENODEV || rc == -EIO) {
             handle_close(h);
         }
@@ -540,20 +513,6 @@ static void apply_optimistic(AsDevice *dev, const AsOpRequest *req)
         break;
     case AS_OP_MOUSE_RIPPLE:
         dev->ripple = req->value;
-        break;
-    case AS_OP_MOUSE_SLEEP:
-        dev->sleep_time = req->value;
-        break;
-    case AS_OP_MOUSE_LIGHT:
-    case AS_OP_KB_LIGHT:
-        dev->light_mode = req->light_mode;
-        dev->light_speed = req->light_speed;
-        dev->light_brightness = req->light_brightness;
-        memcpy(dev->rgb, req->rgb, sizeof(dev->rgb));
-        if (req->op == AS_OP_KB_LIGHT) {
-            dev->light_opt = req->light_option;
-            dev->light_dazzle = req->light_dazzle;
-        }
         break;
     case AS_OP_KB_SIDE_LIGHT:
         if (req->light_mode == 0) {
@@ -592,6 +551,7 @@ static void apply_job_done(gpointer data, GError *error, gpointer user_data)
         return;
     }
     AsDevice *dev = as_store_lookup(job->store, job->path);
+
     if (dev) {
         apply_optimistic(dev, &job->req);
     }
@@ -611,26 +571,12 @@ AsStore *as_store_get(void)
     return instance;
 }
 
-void as_store_scan(AsStore *self)
+/* One scan at a time: the worker serializes device access anyway, and a
+ * queue of scans would only delay the answer the window is waiting for. */
+static void store_request(AsStore *self, const char *path)
 {
     RefreshJob *job;
 
-    g_return_if_fail(AS_IS_STORE(self));
-    if (self->busy) {
-        return;
-    }
-    self->busy = TRUE;
-    job = g_new0(RefreshJob, 1);
-    job->store = self;
-    as_job_run(refresh_job_run, job, refresh_job_free, refresh_job_done, NULL,
-               NULL);
-}
-
-void as_store_refresh(AsStore *self, const char *path)
-{
-    RefreshJob *job;
-
-    g_return_if_fail(AS_IS_STORE(self));
     if (self->busy) {
         return;
     }
@@ -640,6 +586,12 @@ void as_store_refresh(AsStore *self, const char *path)
     job->only_path = g_strdup(path);
     as_job_run(refresh_job_run, job, refresh_job_free, refresh_job_done, NULL,
                NULL);
+}
+
+void as_store_scan(AsStore *self)
+{
+    g_return_if_fail(AS_IS_STORE(self));
+    store_request(self, NULL);
 }
 
 gboolean as_store_busy(AsStore *self)
@@ -656,6 +608,7 @@ AsDevice *as_store_lookup(AsStore *self, const char *path)
 {
     for (guint i = 0; i < self->devices->len; i++) {
         AsDevice *dev = self->devices->pdata[i];
+
         if (strcmp(dev->path, path) == 0) {
             return dev;
         }
@@ -663,17 +616,10 @@ AsDevice *as_store_lookup(AsStore *self, const char *path)
     return NULL;
 }
 
-guint as_store_count(AsStore *self)
-{
-    return self->devices->len;
-}
-
 gboolean as_store_permissions_denied(AsStore *self)
 {
     for (guint i = 0; i < self->devices->len; i++) {
-        AsDevice *dev = self->devices->pdata[i];
-
-        if (dev->permission_denied) {
+        if (((AsDevice *)self->devices->pdata[i])->permission_denied) {
             return TRUE;
         }
     }

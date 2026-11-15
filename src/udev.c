@@ -13,7 +13,8 @@
  * the same family, or a firmware update that renumbers the product id, keeps
  * working without a new rules file.
  */
-#include "attackshark.h"
+#define _GNU_SOURCE
+#include "internal.h"
 
 #include <dirent.h>
 #include <errno.h>
@@ -23,14 +24,14 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
-#include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
 extern char **environ;
 
 #define RULE_FILE "99-attackshark.rules"
-#define RULE_PATH "/etc/udev/rules.d/" RULE_FILE
+#define RULE_DIR "/etc/udev/rules.d"
+#define RULE_PATH RULE_DIR "/" RULE_FILE
 /* Present in the file name and in the header comment, so a renamed copy of
  * the rules file is still recognised. */
 #define RULE_MARKER "attackshark"
@@ -44,7 +45,7 @@ static const struct {
 };
 
 static const char *const rules_dirs[] = {
-    "/etc/udev/rules.d",
+    RULE_DIR,
     "/run/udev/rules.d",
     "/usr/local/lib/udev/rules.d",
     "/usr/lib/udev/rules.d",
@@ -58,43 +59,50 @@ const char *as_udev_rule_path(void)
 
 char *as_udev_rule_text(void)
 {
-    size_t cap = 1024 + sizeof(families) / sizeof(families[0]) * 256;
-    char *text = malloc(cap);
-    int n;
+    static const char header[] =
+        "# Attack Shark peripherals: let the logged-in user talk to\n"
+        "# the hidraw nodes. Written by \"attackshark permissions install\";\n"
+        "# regenerating it is safe, local edits are overwritten.\n"
+        "#\n"
+        "# Rules match the vendor id, not a single product id, so a new\n"
+        "# model of the same family works without a new rules file.\n";
+    char *text = NULL;
+    size_t len = 0;
+    FILE *f = open_memstream(&text, &len);
 
-    if (!text) {
+    if (!f) {
         return NULL;
     }
-    n = snprintf(text, cap,
-                 "# Attack Shark peripherals: let the logged-in user talk to\n"
-                 "# the hidraw nodes. Written by \"attackshark permissions"
-                 " install\";\n"
-                 "# regenerating it is safe, local edits are overwritten.\n"
-                 "#\n"
-                 "# Rules match the vendor id, not a single product id, so a new\n"
-                 "# model of the same family works without a new rules file.\n");
-    for (size_t i = 0; i < sizeof(families) / sizeof(families[0]); i++) {
-        int written = snprintf(text + n, cap - (size_t)n,
-                               "\n# %s\n"
-                               "SUBSYSTEM==\"hidraw\", ATTRS{idVendor}==\"%s\", "
-                               "TAG+=\"uaccess\", MODE=\"0660\"\n",
-                               families[i].comment, families[i].vid);
-
-        if (written < 0 || (size_t)written >= cap - (size_t)n) {
-            free(text);
-            return NULL;
-        }
-        n += written;
+    fputs(header, f);
+    for (size_t i = 0; i < AS_N(families); i++) {
+        fprintf(f, "\n# %s\n"
+                   "SUBSYSTEM==\"hidraw\", ATTRS{idVendor}==\"%s\", "
+                   "TAG+=\"uaccess\", MODE=\"0660\"\n",
+                families[i].comment, families[i].vid);
+    }
+    if (fclose(f) != 0) {
+        free(text);
+        return NULL;
     }
     return text;
 }
 
-static int file_has_marker(const char *path)
+/* The rules file has to be recognised even when it was renamed by the
+ * distribution, so the name and the content are both checked. */
+static int is_rules_file(const char *dir, const char *name)
 {
-    char buf[4096];
-    size_t n;
-    FILE *f = fopen(path, "r");
+    char buf[4096], path[512];
+    size_t len = strlen(name), n;
+    FILE *f;
 
+    if (len <= 6 || strcmp(name + len - 6, ".rules") != 0) {
+        return 0;
+    }
+    if (strstr(name, RULE_MARKER)) {
+        return 1;
+    }
+    snprintf(path, sizeof(path), "%s/%s", dir, name);
+    f = fopen(path, "r");
     if (!f) {
         return 0;
     }
@@ -104,16 +112,9 @@ static int file_has_marker(const char *path)
     return strstr(buf, RULE_MARKER) != NULL;
 }
 
-static int has_rules_suffix(const char *name)
-{
-    size_t len = strlen(name);
-
-    return len > 6 && strcmp(name + len - 6, ".rules") == 0;
-}
-
 int as_udev_rules_installed(void)
 {
-    for (size_t i = 0; i < sizeof(rules_dirs) / sizeof(rules_dirs[0]); i++) {
+    for (size_t i = 0; i < AS_N(rules_dirs); i++) {
         DIR *dir = opendir(rules_dirs[i]);
         struct dirent *de;
 
@@ -121,19 +122,7 @@ int as_udev_rules_installed(void)
             continue;
         }
         while ((de = readdir(dir)) != NULL) {
-            char path[512];
-            int found;
-
-            if (!has_rules_suffix(de->d_name)) {
-                continue;
-            }
-            if (strstr(de->d_name, RULE_MARKER)) {
-                closedir(dir);
-                return 1;
-            }
-            snprintf(path, sizeof(path), "%s/%s", rules_dirs[i], de->d_name);
-            found = file_has_marker(path);
-            if (found) {
+            if (is_rules_file(rules_dirs[i], de->d_name)) {
                 closedir(dir);
                 return 1;
             }
@@ -148,19 +137,32 @@ int as_udev_can_install(void)
     return geteuid() == 0;
 }
 
+static int write_all(int fd, const char *text, size_t len)
+{
+    while (len > 0) {
+        ssize_t n = write(fd, text, len);
+
+        if (n < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            return -errno;
+        }
+        text += n;
+        len -= (size_t)n;
+    }
+    return 0;
+}
+
 static int write_rules(const char *text, char *err, size_t errlen)
 {
     char tmp[256];
-    size_t len = strlen(text), done = 0;
-    struct stat st;
-    int fd, rc = 0;
+    int fd, rc;
 
-    if (stat("/etc/udev/rules.d", &st) != 0) {
-        if (mkdir("/etc/udev/rules.d", 0755) != 0 && errno != EEXIST) {
-            snprintf(err, errlen, "cannot create /etc/udev/rules.d: %s",
-                     strerror(errno));
-            return -errno;
-        }
+    if (mkdir(RULE_DIR, 0755) != 0 && errno != EEXIST) {
+        snprintf(err, errlen, "cannot create %s: %s", RULE_DIR,
+                 strerror(errno));
+        return -errno;
     }
     snprintf(tmp, sizeof(tmp), "%s.tmp", RULE_PATH);
     fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
@@ -168,29 +170,15 @@ static int write_rules(const char *text, char *err, size_t errlen)
         snprintf(err, errlen, "cannot write %s: %s", tmp, strerror(errno));
         return -errno;
     }
-    while (done < len) {
-        ssize_t n = write(fd, text + done, len - done);
-
-        if (n < 0) {
-            if (errno == EINTR) {
-                continue;
-            }
-            rc = -errno;
-            snprintf(err, errlen, "cannot write %s: %s", tmp, strerror(errno));
-            break;
-        }
-        done += (size_t)n;
-    }
-    if (close(fd) != 0 && rc == 0) {
+    rc = write_all(fd, text, strlen(text));
+    if (rc == 0 && close(fd) != 0) {
         rc = -errno;
-        snprintf(err, errlen, "cannot write %s: %s", tmp, strerror(errno));
     }
     if (rc == 0 && rename(tmp, RULE_PATH) != 0) {
         rc = -errno;
-        snprintf(err, errlen, "cannot rename %s to %s: %s", tmp, RULE_PATH,
-                 strerror(errno));
     }
-    if (rc != 0) {
+    if (rc < 0) {
+        snprintf(err, errlen, "cannot write %s: %s", tmp, strerror(-rc));
         unlink(tmp);
     }
     return rc;
@@ -210,14 +198,14 @@ static int run_tool(char *const argv[])
             return -errno;
         }
     }
-    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
-        return -EIO;
-    }
-    return 0;
+    return WIFEXITED(status) && WEXITSTATUS(status) == 0 ? 0 : -EIO;
 }
 
 int as_udev_install(char *err, size_t errlen)
 {
+    char *const reload[] = { "udevadm", "control", "--reload-rules", NULL };
+    char *const trigger[] = { "udevadm", "trigger", "--subsystem-match=hidraw",
+                              NULL };
     char *text;
     int rc;
 
@@ -242,10 +230,6 @@ int as_udev_install(char *err, size_t errlen)
     /* udev only applies the tags to nodes that appear after the rule is
      * loaded, so reload and re-trigger the hidraw subsystem: a keyboard that
      * is already plugged in gains its ACL without a replug. */
-    char *const reload[] = { "udevadm", "control", "--reload-rules", NULL };
-    char *const trigger[] = { "udevadm", "trigger", "--subsystem-match=hidraw",
-                              NULL };
-
     rc = run_tool(reload);
     if (rc == -ENOENT) {
         /* No udevadm: the rules will be picked up on the next plug or boot. */
@@ -265,7 +249,6 @@ int as_udev_install(char *err, size_t errlen)
         snprintf(err, errlen, "the rules file is installed, but \"udevadm "
                               "trigger\" failed: %s; replug the device",
                  strerror(-rc));
-        return rc;
     }
-    return 0;
+    return rc;
 }

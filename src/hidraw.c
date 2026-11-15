@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-#include "attackshark.h"
+#include "internal.h"
 
 #include <dirent.h>
 #include <errno.h>
@@ -24,6 +24,8 @@ static void on_alarm(int sig)
     timed_out = 1;
 }
 
+/* Run fn(arg) with a wall-clock limit; a blocking hidraw ioctl cannot be
+ * interrupted any other way. */
 static int with_timeout(int timeout_ms, int (*fn)(void *), void *arg)
 {
     struct sigaction sa = { 0 }, old;
@@ -33,12 +35,9 @@ static int with_timeout(int timeout_ms, int (*fn)(void *), void *arg)
     if (timeout_ms <= 0) {
         return fn(arg);
     }
-
     sa.sa_handler = on_alarm;
     sigemptyset(&sa.sa_mask);
-    sa.sa_flags = 0;
     sigaction(SIGALRM, &sa, &old);
-
     timed_out = 0;
     it.it_value.tv_sec = timeout_ms / 1000;
     it.it_value.tv_usec = (timeout_ms % 1000) * 1000;
@@ -49,7 +48,6 @@ static int with_timeout(int timeout_ms, int (*fn)(void *), void *arg)
     memset(&it, 0, sizeof(it));
     setitimer(ITIMER_REAL, &it, NULL);
     sigaction(SIGALRM, &old, NULL);
-
     if (ret < 0 && errno == EINTR && timed_out) {
         errno = ETIMEDOUT;
     }
@@ -68,22 +66,11 @@ static int do_ioctl(void *p)
     return ioctl(a->fd, a->req, a->buf);
 }
 
-static int ioctl_timeout(struct as_hid *dev, unsigned long req, uint8_t *buf,
-                         size_t len, int timeout_ms)
-{
-    struct ioctl_arg a = { dev->fd, req, buf };
-    (void)len;
-    return with_timeout(timeout_ms, do_ioctl, &a);
-}
-
 /* Extract "inputN" interface number from HID_PHYS=usb-...:1.2 */
 static int parse_iface(const char *phys)
 {
     const char *p = strstr(phys, "/input");
-    if (!p) {
-        return -1;
-    }
-    return atoi(p + 6);
+    return p ? atoi(p + 6) : -1;
 }
 
 static int read_file(const char *path, unsigned char *buf, size_t max)
@@ -99,8 +86,19 @@ static int read_file(const char *path, unsigned char *buf, size_t max)
     return (int)n;
 }
 
-int as_hid_find(const unsigned char *probe, size_t probe_len,
-                struct as_hid *out, int max)
+/* Copy a uevent value without its newline. */
+static void copy_line(char *dst, size_t cap, const char *src)
+{
+    size_t n = strcspn(src, "\n");
+
+    if (n > cap - 1) {
+        n = cap - 1;
+    }
+    memcpy(dst, src, n);
+    dst[n] = 0;
+}
+
+int as_hid_scan(struct as_hid *out, int max)
 {
     DIR *dir = opendir("/sys/class/hidraw");
     struct dirent *de;
@@ -109,27 +107,17 @@ int as_hid_find(const unsigned char *probe, size_t probe_len,
     if (!dir) {
         return 0;
     }
-
-    while ((de = readdir(dir)) != NULL && found < max) {
+    while (found < max && (de = readdir(dir)) != NULL) {
+        struct as_hid dev = { .fd = -1 };
         char base[512], path[600], line[256];
-        unsigned char desc[512];
         FILE *f;
-        struct as_hid dev;
-        int desc_len;
-        size_t i;
+        int len;
 
         if (strncmp(de->d_name, "hidraw", 6) != 0) {
             continue;
         }
-
-        memset(&dev, 0, sizeof(dev));
-        dev.fd = -1;
-        if (strlen(de->d_name) + 6 > sizeof(dev.path)) {
-            continue;
-        }
-        memcpy(dev.path, "/dev/", 5);
-        memcpy(dev.path + 5, de->d_name, strlen(de->d_name) + 1);
-
+        snprintf(dev.path, sizeof(dev.path), "/dev/%.*s",
+                 (int)sizeof(dev.path) - 6, de->d_name);
         snprintf(base, sizeof(base), "/sys/class/hidraw/%s/device", de->d_name);
         snprintf(path, sizeof(path), "%s/uevent", base);
 
@@ -139,55 +127,74 @@ int as_hid_find(const unsigned char *probe, size_t probe_len,
         }
         while (fgets(line, sizeof(line), f)) {
             if (strncmp(line, "HID_ID=", 7) == 0) {
-                unsigned bus = 0, vid = 0, pid = 0;
-                if (sscanf(line + 7, "%x:%x:%x", &bus, &vid, &pid) == 3) {
-                    dev.bus = bus;
-                    dev.vid = vid;
-                    dev.pid = pid;
-                }
+                sscanf(line + 7, "%x:%x:%x", &dev.bus, &dev.vid, &dev.pid);
             } else if (strncmp(line, "HID_NAME=", 9) == 0) {
-                size_t n = strcspn(line + 9, "\n");
-                if (n > sizeof(dev.product) - 1) {
-                    n = sizeof(dev.product) - 1;
-                }
-                memcpy(dev.product, line + 9, n);
-                dev.product[n] = 0;
+                copy_line(dev.product, sizeof(dev.product), line + 9);
             } else if (strncmp(line, "HID_PHYS=", 9) == 0) {
-                size_t n = strcspn(line + 9, "\n");
-                if (n > sizeof(dev.phys) - 1) {
-                    n = sizeof(dev.phys) - 1;
-                }
-                memcpy(dev.phys, line + 9, n);
-                dev.phys[n] = 0;
+                copy_line(dev.phys, sizeof(dev.phys), line + 9);
                 dev.iface = parse_iface(line + 9);
             }
         }
         fclose(f);
 
         snprintf(path, sizeof(path), "%s/report_descriptor", base);
-        desc_len = read_file(path, desc, sizeof(desc));
-        if (desc_len <= 0) {
+        len = read_file(path, dev.descriptor, sizeof(dev.descriptor));
+        if (len <= 0) {
             continue;
         }
-        dev.descriptor_len = (size_t)desc_len;
-        memcpy(dev.descriptor, desc, (size_t)desc_len);
-
-        if (probe && probe_len > 0) {
-            int match = 0;
-            for (i = 0; i + probe_len <= (size_t)desc_len; i++) {
-                if (memcmp(desc + i, probe, probe_len) == 0) {
-                    match = 1;
-                    break;
-                }
-            }
-            if (!match) {
-                continue;
-            }
-        }
+        dev.descriptor_len = (size_t)len;
         out[found++] = dev;
     }
     closedir(dir);
     return found;
+}
+
+static int collect(int (*match)(const struct as_hid *), struct as_hid *out,
+                   int max)
+{
+    struct as_hid all[AS_HID_MAX];
+    int n = as_hid_scan(all, AS_HID_MAX);
+    int kept = 0;
+
+    for (int i = 0; i < n && kept < max; i++) {
+        if (match(&all[i])) {
+            out[kept++] = all[i];
+        }
+    }
+    return kept;
+}
+
+int as_hid_find_first(int (*match)(const struct as_hid *), struct as_hid *out)
+{
+    struct as_hid one;
+
+    if (collect(match, &one, 1) == 0) {
+        return 0;
+    }
+    if (out) {
+        *out = one;
+    }
+    return 1;
+}
+
+int as_hid_open_first(int (*match)(const struct as_hid *), unsigned vid,
+                      struct as_hid *out)
+{
+    struct as_hid found[AS_HID_MAX];
+    int n = collect(match, found, AS_HID_MAX);
+    int best = 0;
+
+    if (n == 0) {
+        return -ENODEV;
+    }
+    for (int i = 0; i < n; i++) {
+        if (found[i].vid == vid) {
+            best = i;
+            break;
+        }
+    }
+    *out = found[best];
+    return as_hid_open(out);
 }
 
 /* Identity of the physical device a node belongs to. USB interfaces append
@@ -200,79 +207,72 @@ static void device_key(const struct as_hid *dev, char *key, size_t len)
 
     if (n == 0) {
         snprintf(key, len, "%u:%s", dev->bus, dev->path);
-        return;
+    } else {
+        snprintf(key, len, "%u:%.*s", dev->bus, (int)n, dev->phys);
     }
-    snprintf(key, len, "%u:%.*s", dev->bus, (int)n, dev->phys);
 }
 
 /* The settings node is the one the driver talks to, so it represents the
  * device; without vendor collections (Bluetooth) the first node is kept. */
 static int node_rank(const struct as_hid *dev)
 {
-    if (as_hid_has_vendor(dev)) {
-        return 2;
-    }
-    return as_hid_is_bluetooth(dev) ? 1 : 0;
+    return as_hid_has_vendor(dev) ? 2 : as_hid_is_bluetooth(dev) ? 1 : 0;
 }
 
-static int compare_nodes(const void *a, const void *b)
+static int key_rank_cmp(const void *a, const void *b)
 {
-    const struct as_hid *left = a;
-    const struct as_hid *right = b;
+    char ka[128], kb[128];
+    int c;
 
-    return strcmp(left->path, right->path);
+    device_key(a, ka, sizeof(ka));
+    device_key(b, kb, sizeof(kb));
+    c = strcmp(ka, kb);
+    if (c == 0) {
+        c = node_rank(b) - node_rank(a);
+    }
+    return c ? c : strcmp(((const struct as_hid *)a)->path,
+                          ((const struct as_hid *)b)->path);
+}
+
+static int path_cmp(const void *a, const void *b)
+{
+    return strcmp(((const struct as_hid *)a)->path,
+                  ((const struct as_hid *)b)->path);
 }
 
 int as_hid_dedupe(struct as_hid *nodes, int count)
 {
-    struct as_hid *keys;
     int kept = 0;
 
     if (!nodes || count <= 0) {
         return 0;
     }
-    keys = calloc((size_t)count, sizeof(*keys));
-    if (!keys) {
-        return count;
-    }
-
+    /* Sorted by device key, best node of each device first. */
+    qsort(nodes, (size_t)count, sizeof(*nodes), key_rank_cmp);
     for (int i = 0; i < count; i++) {
-        char key[128], known[128];
-        int slot = -1;
+        char key[128], prev[128];
 
         device_key(&nodes[i], key, sizeof(key));
-        for (int j = 0; j < kept; j++) {
-            device_key(&keys[j], known, sizeof(known));
-            if (strcmp(key, known) == 0) {
-                slot = j;
-                break;
+        if (kept > 0) {
+            device_key(&nodes[kept - 1], prev, sizeof(prev));
+            if (strcmp(key, prev) == 0) {
+                continue;
             }
         }
-        if (slot < 0) {
-            keys[kept] = nodes[i];
-            nodes[kept++] = nodes[i];
-        } else if (node_rank(&nodes[i]) > node_rank(&keys[slot])) {
-            keys[slot] = nodes[i];
-            nodes[slot] = nodes[i];
-        }
+        nodes[kept++] = nodes[i];
     }
-    free(keys);
-
-    qsort(nodes, (size_t)kept, sizeof(*nodes), compare_nodes);
+    qsort(nodes, (size_t)kept, sizeof(*nodes), path_cmp);
     return kept;
 }
 
 int as_hid_list_devices(struct as_hid *out, int max)
 {
-    struct as_hid found[32];
-    int n = as_hid_find(NULL, 0, found, 32);
+    struct as_hid found[AS_HID_MAX];
+    int n = as_hid_scan(found, AS_HID_MAX);
     int kept = 0;
 
-    for (int i = 0; i < n; i++) {
-        if (!as_hid_is_keyboard(&found[i]) && !as_hid_is_mouse(&found[i])) {
-            continue;
-        }
-        if (kept < max) {
+    for (int i = 0; i < n && kept < max; i++) {
+        if (as_hid_is_keyboard(&found[i]) || as_hid_is_mouse(&found[i])) {
             out[kept++] = found[i];
         }
     }
@@ -296,58 +296,56 @@ void as_hid_close(struct as_hid *dev)
     }
 }
 
+static int ioctl_feature(struct as_hid *dev, unsigned long req, uint8_t *buf,
+                         size_t len, int timeout_ms)
+{
+    struct ioctl_arg a = { dev->fd, req, buf };
+
+    (void)len;
+    return with_timeout(timeout_ms, do_ioctl, &a) < 0 ? -errno : 0;
+}
+
 int as_feature_set(struct as_hid *dev, const uint8_t *buf, size_t len)
 {
-    int ret = ioctl_timeout(dev, HIDIOCSFEATURE(len), (uint8_t *)buf, len, 3000);
-    if (ret < 0) {
-        return -errno;
-    }
-    return 0;
+    return ioctl_feature(dev, HIDIOCSFEATURE(len), (uint8_t *)buf, len, 3000);
 }
 
 int as_feature_get(struct as_hid *dev, uint8_t *buf, size_t len, int timeout_ms)
 {
-    int ret = ioctl_timeout(dev, HIDIOCGFEATURE(len), buf, len, timeout_ms);
-    if (ret < 0) {
-        return -errno;
-    }
-    return 0;
+    return ioctl_feature(dev, HIDIOCGFEATURE(len), buf, len, timeout_ms);
 }
 
-int as_hid_write(struct as_hid *dev, const uint8_t *buf, size_t len, int timeout_ms)
+/* Wait until the node is ready for events, -ETIMEDOUT when it never is. */
+static int wait_fd(struct as_hid *dev, short events, int timeout_ms)
 {
-    struct pollfd p = { dev->fd, POLLOUT, 0 };
-    int ret;
+    struct pollfd p = { dev->fd, events, 0 };
+    int ret = poll(&p, 1, timeout_ms);
 
-    ret = poll(&p, 1, timeout_ms);
     if (ret < 0) {
         return -errno;
     }
-    if (ret == 0) {
-        return -ETIMEDOUT;
+    return ret ? 0 : -ETIMEDOUT;
+}
+
+int as_hid_write(struct as_hid *dev, const uint8_t *buf, size_t len,
+                 int timeout_ms)
+{
+    int ret = wait_fd(dev, POLLOUT, timeout_ms);
+
+    if (ret < 0) {
+        return ret;
     }
     ret = (int)write(dev->fd, buf, len);
-    if (ret < 0) {
-        return -errno;
-    }
-    return ret;
+    return ret < 0 ? -errno : ret;
 }
 
 int as_hid_read(struct as_hid *dev, uint8_t *buf, size_t len, int timeout_ms)
 {
-    struct pollfd p = { dev->fd, POLLIN, 0 };
-    int ret;
+    int ret = wait_fd(dev, POLLIN, timeout_ms);
 
-    ret = poll(&p, 1, timeout_ms);
     if (ret < 0) {
-        return -errno;
-    }
-    if (ret == 0) {
-        return -ETIMEDOUT;
+        return ret;
     }
     ret = (int)read(dev->fd, buf, len);
-    if (ret < 0) {
-        return -errno;
-    }
-    return ret;
+    return ret < 0 ? -errno : ret;
 }

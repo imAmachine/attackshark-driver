@@ -1,17 +1,19 @@
 // SPDX-License-Identifier: MIT
 #define _GNU_SOURCE
-#include "attackshark.h"
+#include "internal.h"
 
-#include <ctype.h>
 #include <errno.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <signal.h>
 #include <unistd.h>
 
 static int json_mode;
 static int optional_mode;
+
+static const char *const mag_mode_names[] = { "comfort", "sensitive",
+                                              "gaming", "custom" };
 
 /* The driver installs its own udev rules; point the user at that instead of
  * asking them to copy a file into /etc by hand. */
@@ -23,18 +25,28 @@ static void note_udev(void)
             "            or press \"Исправить\" in attackshark-gui\n");
 }
 
-static const char *mag_mode_names[] = { "comfort", "sensitive", "gaming", "custom" };
+static void report(int ret)
+{
+    fprintf(stderr, "attackshark: %s\n", as_strerror(ret));
+}
+
+static const char *jbool(int value)
+{
+    return value ? "true" : "false";
+}
 
 static int parse_bool(const char *s, int *value)
 {
     if (!s) {
         return -1;
     }
-    if (!strcmp(s, "on") || !strcmp(s, "1") || !strcmp(s, "true") || !strcmp(s, "yes")) {
+    if (!strcmp(s, "on") || !strcmp(s, "1") || !strcmp(s, "true") ||
+        !strcmp(s, "yes")) {
         *value = 1;
         return 0;
     }
-    if (!strcmp(s, "off") || !strcmp(s, "0") || !strcmp(s, "false") || !strcmp(s, "no")) {
+    if (!strcmp(s, "off") || !strcmp(s, "0") || !strcmp(s, "false") ||
+        !strcmp(s, "no")) {
         *value = 0;
         return 0;
     }
@@ -44,16 +56,14 @@ static int parse_bool(const char *s, int *value)
 static int parse_color(const char *s, uint8_t *r, uint8_t *g, uint8_t *b)
 {
     unsigned v;
-    size_t len;
 
     if (!s) {
         return -1;
     }
-    if (s[0] == '#') {
+    if (*s == '#') {
         s++;
     }
-    len = strlen(s);
-    if (len != 6 || sscanf(s, "%6x", &v) != 1) {
+    if (strlen(s) != 6 || sscanf(s, "%6x", &v) != 1) {
         return -1;
     }
     *r = (uint8_t)(v >> 16);
@@ -90,6 +100,18 @@ static int opt_flag(int argc, char **argv, const char *name)
     return 0;
 }
 
+/* "on"/"off" is a positional argument, unlike the --options. */
+static int light_power_arg(int argc, char **argv, int *on)
+{
+    for (int i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], "on") || !strcmp(argv[i], "off")) {
+            *on = argv[i][1] == 'n';
+            return 1;
+        }
+    }
+    return 0;
+}
+
 /* ------------------------------ list ------------------------------ */
 
 static int cmd_list(void)
@@ -98,53 +120,41 @@ static int cmd_list(void)
     /* One entry per physical device: a composite keyboard such as the R85 HE
      * publishes three hidraw nodes, and only one of them has settings. */
     int n = as_hid_list_devices(found, 16);
-    int first = 1;
-    int bt_hint = 0;
-    int configurable_mouse = 0;
-    int denied = 0;
+    int first = 1, bt_hint = 0, configurable_mouse = 0, denied = 0;
 
     if (json_mode) {
         printf("[");
     }
     for (int i = 0; i < n; i++) {
-        const char *kind = NULL;
-        const char *product = "unknown";
-        int bluetooth = as_hid_is_bluetooth(&found[i]);
-        int configurable;
-        int accessible = access(found[i].path, R_OK | W_OK) == 0;
+        const struct as_hid *dev = &found[i];
+        int bluetooth = as_hid_is_bluetooth(dev);
+        int configurable = as_hid_has_vendor(dev);
+        int accessible = access(dev->path, R_OK | W_OK) == 0;
+        const char *kind, *product;
 
-        if (as_hid_is_keyboard(&found[i])) {
+        if (as_hid_is_keyboard(dev)) {
             kind = "keyboard";
             product = "R85 HE";
-        } else if (as_hid_is_mouse(&found[i])) {
+        } else if (as_hid_is_mouse(dev)) {
             kind = "mouse";
-            product = as_mouse_model_name(found[i].pid);
+            product = as_mouse_model_name(dev->pid);
         } else {
             continue;
         }
-        configurable = as_hid_has_vendor(&found[i]);
-        if (!configurable && bluetooth) {
-            bt_hint = 1;
-        }
-        if (configurable && !strcmp(kind, "mouse")) {
-            configurable_mouse = 1;
-        }
-        if (!accessible) {
-            denied++;
-        }
+        bt_hint |= !configurable && bluetooth;
+        configurable_mouse |= configurable && !strcmp(kind, "mouse");
+        denied += !accessible;
         if (json_mode) {
             printf("%s{\"kind\":\"%s\",\"path\":\"%s\",\"vid\":%u,"
                    "\"pid\":%u,\"interface\":%d,\"product\":\"%s\","
                    "\"transport\":\"%s\",\"configurable\":%s,"
                    "\"accessible\":%s}",
-                   first ? "" : ",", kind, found[i].path, found[i].vid,
-                   found[i].pid, found[i].iface, product,
-                   bluetooth ? "bluetooth" : "usb",
-                   configurable ? "true" : "false",
-                   accessible ? "true" : "false");
+                   first ? "" : ",", kind, dev->path, dev->vid, dev->pid,
+                   dev->iface, product, bluetooth ? "bluetooth" : "usb",
+                   jbool(configurable), jbool(accessible));
         } else {
             printf("%-8s %s  %04x:%04x  iface %d  %-3s %s%s%s\n", kind,
-                   found[i].path, found[i].vid, found[i].pid, found[i].iface,
+                   dev->path, dev->vid, dev->pid, dev->iface,
                    bluetooth ? "bt" : "usb", product,
                    configurable ? "" : "  (settings unavailable)",
                    accessible ? "" : "  (no access)");
@@ -175,8 +185,9 @@ static int cmd_list(void)
 static int cmd_permissions(int argc, char **argv)
 {
     const char *sub = argc > 0 ? argv[0] : "status";
+    struct as_hid found[16];
     char err[256] = "";
-    int ret;
+    int n, denied = 0, ret;
 
     if (!strcmp(sub, "install")) {
         ret = as_udev_install(err, sizeof(err));
@@ -197,30 +208,23 @@ static int cmd_permissions(int argc, char **argv)
         return 2;
     }
 
-    struct as_hid found[16];
-    int n = as_hid_list_devices(found, 16);
-    int denied = 0;
-
+    n = as_hid_list_devices(found, 16);
     for (int i = 0; i < n; i++) {
-        if (access(found[i].path, R_OK | W_OK) != 0) {
-            denied++;
-        }
+        denied += access(found[i].path, R_OK | W_OK) != 0;
     }
     if (json_mode) {
         printf("{\"rules_file\":\"%s\",\"installed\":%s,\"root\":%s,"
-               "\"devices\":[",
-               as_udev_rule_path(), as_udev_rules_installed() ? "true" : "false",
-               as_udev_can_install() ? "true" : "false");
+               "\"devices\":[", as_udev_rule_path(),
+               jbool(as_udev_rules_installed()), jbool(as_udev_can_install()));
         for (int i = 0; i < n; i++) {
             printf("%s{\"path\":\"%s\",\"accessible\":%s}", i ? "," : "",
                    found[i].path,
-                   access(found[i].path, R_OK | W_OK) == 0 ? "true" : "false");
+                   jbool(access(found[i].path, R_OK | W_OK) == 0));
         }
         printf("]}\n");
     } else {
         printf("rules file  %s\n", as_udev_rule_path());
-        printf("installed   %s\n",
-               as_udev_rules_installed() ? "yes" : "no");
+        printf("installed   %s\n", as_udev_rules_installed() ? "yes" : "no");
         if (!n) {
             printf("devices     none\n");
         }
@@ -240,28 +244,158 @@ static int cmd_permissions(int argc, char **argv)
 
 /* ------------------------------ mouse ------------------------------ */
 
+static int mouse_usage(struct as_mouse *m, const char *what, const char *args)
+{
+    fprintf(stderr, "usage: attackshark mouse %s %s\n", what, args);
+    as_mouse_close(m);
+    return 2;
+}
+
+/* Reads the settings block; a read error and a sleeping mouse are both
+ * reported here, so callers only have to test for 0. */
+static int mouse_read_settings(struct as_mouse *m, struct as_mouse_state *st)
+{
+    int ret = as_mouse_read_state(m, st);
+
+    if (ret < 0) {
+        report(ret);
+    } else if (!st->config_valid) {
+        fprintf(stderr, "attackshark: mouse is offline\n");
+        ret = -ENODEV;
+    }
+    return ret;
+}
+
+static void mouse_open_failed(struct as_hid *bluetooth, int ret)
+{
+    if (ret == -ENOTSUP && as_mouse_find_bluetooth(bluetooth)) {
+        fprintf(stderr, "attackshark: %s at %s, but %s\n",
+                as_mouse_model_name(bluetooth->pid), bluetooth->path,
+                as_strerror(ret));
+    } else if (ret == -ENODEV) {
+        fprintf(stderr, "attackshark: mouse not found\n");
+    } else {
+        report(ret);
+        if (ret == -EACCES) {
+            note_udev();
+        }
+    }
+}
+
+/* Raw settings that are a single byte in the config block. */
+static const struct {
+    const char *name;
+    unsigned offset;
+    const char *arg;
+    int boolean;
+} mouse_u8[] = {
+    { "lod", AS_M_LOD, "VALUE", 0 },
+    { "debounce", AS_M_DEBOUNCE, "VALUE", 0 },
+    { "sleep", AS_M_SLEEP_TIME, "VALUE", 0 },
+    { "motion-sync", AS_M_MOTION_SYNC, "on|off", 1 },
+    { "angle-snap", AS_M_ANGLE_SNAP, "on|off", 1 },
+    { "ripple", AS_M_RIPPLE, "on|off", 1 },
+};
+
+static int mouse_u8_index(const char *name)
+{
+    for (size_t i = 0; i < AS_N(mouse_u8); i++) {
+        if (!strcmp(name, mouse_u8[i].name)) {
+            return (int)i;
+        }
+    }
+    return -1;
+}
+
+static void mouse_info_json(const struct as_mouse *m,
+                            const struct as_mouse_state *st)
+{
+    printf("{\"product\":\"%s\",\"vid\":%u,\"pid\":%u,\"cid\":%u,"
+           "\"mid\":%u,\"type\":%u,\"online\":%d,\"config_valid\":%d,"
+           "\"profile\":%d,\"version\":\"%d.%02x\","
+           "\"dongle_version\":\"%d.%d.%d\","
+           "\"battery\":%d,\"charging\":%d,\"battery_voltage\":%d,"
+           "\"report_rate\":%d,\"dpi_stages\":%d,\"active_stage\":%d,"
+           "\"lod\":%d,\"debounce\":%d,\"motion_sync\":%d,"
+           "\"angle_snap\":%d,\"ripple\":%d,\"sleep\":%d,"
+           "\"light\":{\"mode\":%d,\"brightness\":%d,\"speed\":%d,"
+           "\"color\":\"%02x%02x%02x\",\"on\":%d},\"dpi\":[",
+           as_mouse_model_name(m->hid.pid), m->hid.vid, m->hid.pid, m->cid,
+           m->mid, m->type, st->online, st->config_valid, st->profile,
+           st->version_major, st->version_minor, st->dongle_version[0],
+           st->dongle_version[1], st->dongle_version[2], st->battery,
+           st->charging, st->battery_voltage, st->report_rate, st->dpi_stages,
+           st->active_dpi_stage, st->lod, st->debounce, st->motion_sync,
+           st->angle_snap, st->ripple, st->sleep_time, st->light_mode,
+           st->light_brightness, st->light_speed, st->light_color[0],
+           st->light_color[1], st->light_color[2], st->light_on);
+    for (int i = 0; i < st->dpi_stages; i++) {
+        printf("%s%u", i ? "," : "", st->dpi[i]);
+    }
+    printf("]}\n");
+}
+
+static void mouse_info_text(const struct as_mouse *m,
+                            const struct as_mouse_state *st)
+{
+    printf("device         %s\n", as_mouse_model_name(m->hid.pid));
+    printf("usb            %04x:%04x  %s\n", m->hid.vid, m->hid.pid,
+           m->hid.path);
+    printf("device id      cid %u mid %u type %u\n", m->cid, m->mid, m->type);
+    if (st->version_valid) {
+        printf("firmware       v%d.%02x\n", st->version_major,
+               st->version_minor);
+    }
+    if (st->dongle_version_valid) {
+        printf("dongle         v%d.%d.%d\n", st->dongle_version[0],
+               st->dongle_version[1], st->dongle_version[2]);
+    }
+    printf("link           %s\n", st->online ? "online" : "offline");
+    if (st->battery) {
+        printf("battery        %d%%%s", st->battery,
+               st->charging ? " (charging)" : "");
+        if (st->battery_voltage) {
+            printf("  %d mV", st->battery_voltage);
+        }
+        printf("\n");
+    }
+    if (!st->config_valid) {
+        printf("settings       unavailable - turn the mouse on and wake it\n");
+        return;
+    }
+    printf("profile        %d\n", st->profile + 1);
+    printf("report rate    %d Hz\n", st->report_rate);
+    printf("dpi stages     %d (active %d)\n", st->dpi_stages,
+           st->active_dpi_stage + 1);
+    for (int i = 0; i < st->dpi_stages; i++) {
+        printf("  stage %d      %u dpi%s\n", i + 1, st->dpi[i],
+               i == st->active_dpi_stage ? "  <- current" : "");
+    }
+    printf("lod            %d\n", st->lod);
+    printf("debounce       %d ms\n", st->debounce);
+    printf("motion sync    %s\n", st->motion_sync ? "on" : "off");
+    printf("angle snap     %s\n", st->angle_snap ? "on" : "off");
+    printf("ripple         %s\n", st->ripple ? "on" : "off");
+    printf("sleep          %d\n", st->sleep_time);
+    printf("light          mode %d  %s  %02x%02x%02x  "
+           "brightness %d  speed %d\n", st->light_mode,
+           st->light_on ? "on" : "off", st->light_color[0],
+           st->light_color[1], st->light_color[2], st->light_brightness,
+           st->light_speed);
+}
+
 static int cmd_mouse(int argc, char **argv)
 {
     struct as_mouse m;
     struct as_mouse_state st;
     const char *sub = argc > 0 ? argv[0] : "info";
-    int ret;
+    int ret, u8;
 
     ret = as_mouse_open(&m);
     if (ret < 0) {
-        struct as_hid bt;
+        struct as_hid bluetooth;
 
-        if (ret == -ENOTSUP && as_mouse_find_bluetooth(&bt)) {
-            fprintf(stderr, "attackshark: %s at %s, but %s\n",
-                    as_mouse_model_name(bt.pid), bt.path, as_strerror(ret));
-        } else if (ret == -ENODEV) {
-            fprintf(stderr, "attackshark: mouse not found\n");
-        } else {
-            fprintf(stderr, "attackshark: %s\n", as_strerror(ret));
-            if (ret == -EACCES) {
-                note_udev();
-            }
-        }
+        mouse_open_failed(&bluetooth, ret);
         as_mouse_close(&m);
         return 1;
     }
@@ -269,84 +403,19 @@ static int cmd_mouse(int argc, char **argv)
     if (!strcmp(sub, "info")) {
         ret = as_mouse_read_state(&m, &st);
         if (ret < 0) {
-            fprintf(stderr, "attackshark: %s\n", as_strerror(ret));
+            report(ret);
             as_mouse_close(&m);
             return 1;
         }
         if (json_mode) {
-            printf("{\"product\":\"%s\",\"vid\":%u,\"pid\":%u,\"cid\":%u,"
-                   "\"mid\":%u,\"type\":%u,\"online\":%d,\"config_valid\":%d,"
-                   "\"profile\":%d,\"version\":\"%d.%02x\","
-                   "\"dongle_version\":\"%d.%d.%d\","
-                   "\"battery\":%d,\"charging\":%d,\"battery_voltage\":%d,"
-                   "\"report_rate\":%d,\"dpi_stages\":%d,\"active_stage\":%d,"
-                   "\"lod\":%d,\"debounce\":%d,\"motion_sync\":%d,"
-                   "\"angle_snap\":%d,\"ripple\":%d,\"sleep\":%d,"
-                   "\"light\":{\"mode\":%d,\"brightness\":%d,\"speed\":%d,"
-                   "\"color\":\"%02x%02x%02x\",\"on\":%d},\"dpi\":[",
-                   as_mouse_model_name(m.hid.pid), m.hid.vid, m.hid.pid, m.cid,
-                   m.mid, m.type, st.online, st.config_valid, st.profile,
-                   st.version_major, st.version_minor, st.dongle_version[0],
-                   st.dongle_version[1], st.dongle_version[2], st.battery,
-                   st.charging, st.battery_voltage, st.report_rate,
-                   st.dpi_stages, st.active_dpi_stage, st.lod, st.debounce,
-                   st.motion_sync, st.angle_snap, st.ripple, st.sleep_time,
-                   st.light_mode, st.light_brightness, st.light_speed,
-                   st.light_color[0], st.light_color[1], st.light_color[2],
-                   st.light_on);
-            for (int i = 0; i < st.dpi_stages; i++) {
-                printf("%s%u", i ? "," : "", st.dpi[i][0]);
-            }
-            printf("]}\n");
+            mouse_info_json(&m, &st);
         } else {
-            printf("device         %s\n", as_mouse_model_name(m.hid.pid));
-            printf("usb            %04x:%04x  %s\n", m.hid.vid, m.hid.pid, m.hid.path);
-            printf("device id      cid %u mid %u type %u\n", m.cid, m.mid, m.type);
-            if (st.version_valid) {
-                printf("firmware       v%d.%02x\n", st.version_major,
-                       st.version_minor);
-            }
-            if (st.dongle_version_valid) {
-                printf("dongle         v%d.%d.%d\n", st.dongle_version[0],
-                       st.dongle_version[1], st.dongle_version[2]);
-            }
-            printf("link           %s\n", st.online ? "online" : "offline");
-            if (st.battery) {
-                printf("battery        %d%%%s", st.battery,
-                       st.charging ? " (charging)" : "");
-                if (st.battery_voltage) {
-                    printf("  %d mV", st.battery_voltage);
-                }
-                printf("\n");
-            }
-            if (!st.config_valid) {
-                printf("settings       unavailable - turn the mouse on and wake it\n");
-            } else {
-                printf("profile        %d\n", st.profile + 1);
-                printf("report rate    %d Hz\n", st.report_rate);
-                printf("dpi stages     %d (active %d)\n", st.dpi_stages,
-                       st.active_dpi_stage + 1);
-                for (int i = 0; i < st.dpi_stages; i++) {
-                    printf("  stage %d      %u dpi%s\n", i + 1, st.dpi[i][0],
-                           i == st.active_dpi_stage ? "  <- current" : "");
-                }
-                printf("lod            %d\n", st.lod);
-                printf("debounce       %d ms\n", st.debounce);
-                printf("motion sync    %s\n", st.motion_sync ? "on" : "off");
-                printf("angle snap     %s\n", st.angle_snap ? "on" : "off");
-                printf("ripple         %s\n", st.ripple ? "on" : "off");
-                printf("sleep          %d\n", st.sleep_time);
-                printf("light          mode %d  %s  %02x%02x%02x  "
-                       "brightness %d  speed %d\n", st.light_mode,
-                       st.light_on ? "on" : "off", st.light_color[0],
-                       st.light_color[1], st.light_color[2],
-                       st.light_brightness, st.light_speed);
-            }
+            mouse_info_text(&m, &st);
         }
     } else if (!strcmp(sub, "battery")) {
         ret = as_mouse_read_state(&m, &st);
         if (ret < 0) {
-            fprintf(stderr, "attackshark: %s\n", as_strerror(ret));
+            report(ret);
         } else if (json_mode) {
             printf("{\"battery\":%d,\"charging\":%d,\"voltage\":%d}\n",
                    st.battery, st.charging, st.battery_voltage);
@@ -354,40 +423,33 @@ static int cmd_mouse(int argc, char **argv)
             printf("%d%%%s\n", st.battery, st.charging ? " (charging)" : "");
         }
     } else if (!strcmp(sub, "dpi")) {
-        ret = as_mouse_read_state(&m, &st);
-        if (ret < 0) {
-            fprintf(stderr, "attackshark: %s\n", as_strerror(ret));
-        } else if (argc > 1 && !strcmp(argv[1], "set")) {
-            unsigned stage = 0, dpi = 0;
+        if (argc > 1 && !strcmp(argv[1], "set")) {
+            unsigned stage, dpi;
+
             if (argc < 4 || sscanf(argv[2], "%u", &stage) != 1 ||
                 sscanf(argv[3], "%u", &dpi) != 1) {
-                fprintf(stderr, "usage: attackshark mouse dpi set STAGE DPI\n");
-                as_mouse_close(&m);
-                return 2;
+                return mouse_usage(&m, "dpi set", "STAGE DPI");
             }
             ret = as_mouse_set_dpi_stage(&m, (int)stage - 1, dpi);
             if (ret < 0) {
                 fprintf(stderr, "attackshark: %s\n",
                         ret == -EINVAL ? "dpi must be 50..30000 step 50 or "
-                                         "30100..60000 step 100" : as_strerror(ret));
+                                         "30100..60000 step 100"
+                                       : as_strerror(ret));
             } else if (!json_mode) {
                 printf("stage %u set to %u dpi\n", stage, dpi);
             }
-        } else if (!st.config_valid) {
-            fprintf(stderr, "attackshark: mouse is offline\n");
-            ret = -ENODEV;
-        } else {
+        } else if ((ret = mouse_read_settings(&m, &st)) == 0) {
             for (int i = 0; i < st.dpi_stages; i++) {
-                printf("stage %d  %u dpi\n", i + 1, st.dpi[i][0]);
+                printf("stage %d  %u dpi\n", i + 1, st.dpi[i]);
             }
         }
     } else if (!strcmp(sub, "rate")) {
         if (argc > 1 && !strcmp(argv[1], "set")) {
             int hz;
+
             if (argc < 3 || sscanf(argv[2], "%d", &hz) != 1) {
-                fprintf(stderr, "usage: attackshark mouse rate set HZ\n");
-                as_mouse_close(&m);
-                return 2;
+                return mouse_usage(&m, "rate set", "HZ");
             }
             ret = as_mouse_set_report_rate(&m, hz);
             if (ret < 0) {
@@ -396,68 +458,31 @@ static int cmd_mouse(int argc, char **argv)
             } else if (!json_mode) {
                 printf("report rate set to %d Hz\n", hz);
             }
-        } else {
-            ret = as_mouse_read_state(&m, &st);
-            if (ret < 0) {
-                fprintf(stderr, "attackshark: %s\n", as_strerror(ret));
-            } else if (!st.config_valid) {
-                fprintf(stderr, "attackshark: mouse is offline\n");
-                ret = -ENODEV;
-            } else {
-                printf("%d Hz\n", st.report_rate);
-            }
+        } else if ((ret = mouse_read_settings(&m, &st)) == 0) {
+            printf("%d Hz\n", st.report_rate);
         }
-    } else if (!strcmp(sub, "lod") || !strcmp(sub, "debounce") ||
-               !strcmp(sub, "sleep")) {
-        unsigned offset = !strcmp(sub, "lod") ? AS_M_LOD :
-                          !strcmp(sub, "debounce") ? AS_M_DEBOUNCE :
-                          AS_M_SLEEP_TIME;
-        int value;
-        if (argc < 2 || sscanf(argv[1], "%d", &value) != 1) {
-            fprintf(stderr, "usage: attackshark mouse %s VALUE\n", sub);
-            as_mouse_close(&m);
-            return 2;
+    } else if ((u8 = mouse_u8_index(sub)) >= 0) {
+        int value = 0;
+        int ok = argc > 1 && (mouse_u8[u8].boolean
+                                  ? parse_bool(argv[1], &value) == 0
+                                  : sscanf(argv[1], "%d", &value) == 1);
+
+        if (!ok) {
+            return mouse_usage(&m, sub, mouse_u8[u8].arg);
         }
-        ret = as_mouse_set_u8(&m, offset, (uint8_t)value);
+        ret = as_mouse_set_u8(&m, mouse_u8[u8].offset, (uint8_t)value);
         if (ret < 0) {
-            fprintf(stderr, "attackshark: %s\n", as_strerror(ret));
-        }
-    } else if (!strcmp(sub, "motion-sync") || !strcmp(sub, "angle-snap") ||
-               !strcmp(sub, "ripple")) {
-        unsigned offset = !strcmp(sub, "motion-sync") ? AS_M_MOTION_SYNC :
-                          !strcmp(sub, "angle-snap") ? AS_M_ANGLE_SNAP :
-                          AS_M_RIPPLE;
-        int value;
-        if (argc < 2 || parse_bool(argv[1], &value) < 0) {
-            fprintf(stderr, "usage: attackshark mouse %s on|off\n", sub);
-            as_mouse_close(&m);
-            return 2;
-        }
-        ret = as_mouse_set_u8(&m, offset, (uint8_t)value);
-        if (ret < 0) {
-            fprintf(stderr, "attackshark: %s\n", as_strerror(ret));
+            report(ret);
         }
     } else if (!strcmp(sub, "light")) {
         const char *mode = opt_value(argc, argv, "--mode");
         const char *color = opt_value(argc, argv, "--color");
         const char *bright = opt_value(argc, argv, "--brightness");
         const char *speed = opt_value(argc, argv, "--speed");
-        int on = 1, have_on = 0;
+        int on = 1, have_on = light_power_arg(argc, argv, &on);
 
-        for (int i = 1; i < argc; i++) {
-            if (!strcmp(argv[i], "on") || !strcmp(argv[i], "off")) {
-                have_on = 1;
-                on = argv[i][1] == 'n';
-            }
-        }
         if (!mode && !color && !bright && !speed && !have_on) {
-            ret = as_mouse_read_state(&m, &st);
-            if (ret < 0) {
-                fprintf(stderr, "attackshark: %s\n", as_strerror(ret));
-            } else if (!st.config_valid) {
-                fprintf(stderr, "attackshark: mouse is offline\n");
-                ret = -ENODEV;
-            } else {
+            if ((ret = mouse_read_settings(&m, &st)) == 0) {
                 printf("mode        %d\n", st.light_mode);
                 printf("color       %02x%02x%02x\n", st.light_color[0],
                        st.light_color[1], st.light_color[2]);
@@ -467,62 +492,51 @@ static int cmd_mouse(int argc, char **argv)
             }
         } else {
             uint8_t c[3] = { 0xff, 0, 0 };
-            int lm = 1, lb = 5, ls = 3;
+            int lm = mode ? atoi(mode) : 1;
+            int lb = bright ? atoi(bright) : 5;
+            int ls = speed ? atoi(speed) : 3;
+
             if (color && parse_color(color, &c[0], &c[1], &c[2]) < 0) {
                 fprintf(stderr, "attackshark: color must be RRGGBB\n");
                 as_mouse_close(&m);
                 return 2;
             }
-            if (mode) {
-                lm = atoi(mode);
-            }
-            if (bright) {
-                lb = atoi(bright);
-            }
-            if (speed) {
-                ls = atoi(speed);
-            }
             ret = as_mouse_set_light(&m, (uint8_t)lm, c[0], c[1], c[2],
                                      (uint8_t)ls, (uint8_t)lb, on);
             if (ret < 0) {
-                fprintf(stderr, "attackshark: %s\n", as_strerror(ret));
+                report(ret);
             } else if (!json_mode) {
                 printf("light updated\n");
             }
         }
     } else if (!strcmp(sub, "effect")) {
         const char *what = argc > 1 ? argv[1] : NULL;
-        unsigned offset;
-        int value;
+
         if (!what) {
-            ret = as_mouse_read_state(&m, &st);
-            if (ret < 0) {
-                fprintf(stderr, "attackshark: %s\n", as_strerror(ret));
-            } else if (!st.config_valid) {
-                fprintf(stderr, "attackshark: mouse is offline\n");
-                ret = -ENODEV;
-            } else {
+            if ((ret = mouse_read_settings(&m, &st)) == 0) {
                 printf("mode        %u\n", st.raw[AS_M_DPI_EFFECT_MODE]);
                 printf("brightness  %u\n", st.raw[AS_M_DPI_EFFECT_BRIGHTNESS]);
                 printf("speed       %u\n", st.raw[AS_M_DPI_EFFECT_SPEED]);
-                printf("state       %s\n", st.raw[AS_M_DPI_EFFECT_STATE] ? "on" : "off");
+                printf("state       %s\n",
+                       st.raw[AS_M_DPI_EFFECT_STATE] ? "on" : "off");
             }
         } else if (!strcmp(what, "on") || !strcmp(what, "off")) {
             ret = as_mouse_set_u8(&m, AS_M_DPI_EFFECT_STATE,
                                   (uint8_t)(what[1] == 'n'));
             if (ret < 0) {
-                fprintf(stderr, "attackshark: %s\n", as_strerror(ret));
+                report(ret);
             }
         } else {
+            int value;
+            unsigned offset = !strcmp(what, "mode") ? AS_M_DPI_EFFECT_MODE
+                            : !strcmp(what, "brightness")
+                                ? AS_M_DPI_EFFECT_BRIGHTNESS
+                            : !strcmp(what, "speed") ? AS_M_DPI_EFFECT_SPEED : 0;
+
             if (argc < 3 || sscanf(argv[2], "%d", &value) != 1) {
-                fprintf(stderr, "usage: attackshark mouse effect mode|brightness|"
-                                "speed VALUE\n");
-                as_mouse_close(&m);
-                return 2;
+                return mouse_usage(&m, "effect",
+                                   "mode|brightness|speed VALUE");
             }
-            offset = !strcmp(what, "mode") ? AS_M_DPI_EFFECT_MODE :
-                     !strcmp(what, "brightness") ? AS_M_DPI_EFFECT_BRIGHTNESS :
-                     !strcmp(what, "speed") ? AS_M_DPI_EFFECT_SPEED : 0;
             if (!offset) {
                 fprintf(stderr, "unknown effect field\n");
                 as_mouse_close(&m);
@@ -530,12 +544,13 @@ static int cmd_mouse(int argc, char **argv)
             }
             ret = as_mouse_set_u8(&m, offset, (uint8_t)value);
             if (ret < 0) {
-                fprintf(stderr, "attackshark: %s\n", as_strerror(ret));
+                report(ret);
             }
         }
     } else if (!strcmp(sub, "dump")) {
         unsigned addr = 0, len = AS_MOUSE_CONFIG_LEN;
         uint8_t buf[AS_MOUSE_CONFIG_LEN];
+
         if (argc > 1) {
             sscanf(argv[1], "%x", &addr);
         }
@@ -547,7 +562,7 @@ static int cmd_mouse(int argc, char **argv)
         }
         ret = as_mouse_read_block(&m, addr, buf, len);
         if (ret < 0) {
-            fprintf(stderr, "attackshark: %s\n", as_strerror(ret));
+            report(ret);
         } else {
             for (unsigned i = 0; i < len; i += 16) {
                 printf("%04x:", addr + i);
@@ -560,72 +575,65 @@ static int cmd_mouse(int argc, char **argv)
     } else if (!strcmp(sub, "backup") || !strcmp(sub, "restore")) {
         const char *file = argc > 1 ? argv[1] : NULL;
         uint8_t buf[AS_MOUSE_CONFIG_LEN];
+        int backup = !strcmp(sub, "backup");
         FILE *f;
+
         if (!file) {
-            fprintf(stderr, "usage: attackshark mouse %s FILE\n", sub);
-            as_mouse_close(&m);
-            return 2;
+            return mouse_usage(&m, sub, "FILE");
         }
-        if (!strcmp(sub, "backup")) {
-            ret = as_mouse_read_block(&m, 0, buf, sizeof(buf));
-            if (ret < 0) {
-                fprintf(stderr, "attackshark: %s\n", as_strerror(ret));
-                as_mouse_close(&m);
-                return 1;
-            }
-            f = fopen(file, "wb");
-            if (!f) {
-                perror("attackshark");
-                as_mouse_close(&m);
-                return 1;
-            }
+        if (backup &&
+            (ret = as_mouse_read_block(&m, 0, buf, sizeof(buf))) < 0) {
+            report(ret);
+            as_mouse_close(&m);
+            return 1;
+        }
+        f = fopen(file, backup ? "wb" : "rb");
+        if (!f) {
+            perror("attackshark");
+            as_mouse_close(&m);
+            return 1;
+        }
+        if (backup) {
             fwrite(buf, 1, sizeof(buf), f);
+        } else if (fread(buf, 1, sizeof(buf), f) != sizeof(buf)) {
+            fprintf(stderr, "attackshark: %s must hold %d bytes\n", file,
+                    AS_MOUSE_CONFIG_LEN);
             fclose(f);
+            as_mouse_close(&m);
+            return 1;
+        }
+        fclose(f);
+        if (backup) {
             printf("saved %zu bytes to %s\n", sizeof(buf), file);
+        } else if ((ret = as_mouse_write_block(&m, 0, buf, sizeof(buf))) < 0) {
+            report(ret);
         } else {
-            f = fopen(file, "rb");
-            if (!f) {
-                perror("attackshark");
-                as_mouse_close(&m);
-                return 1;
-            }
-            if (fread(buf, 1, sizeof(buf), f) != sizeof(buf)) {
-                fprintf(stderr, "attackshark: %s must hold %d bytes\n", file,
-                        AS_MOUSE_CONFIG_LEN);
-                fclose(f);
-                as_mouse_close(&m);
-                return 1;
-            }
-            fclose(f);
-            ret = as_mouse_write_block(&m, 0, buf, sizeof(buf));
-            if (ret < 0) {
-                fprintf(stderr, "attackshark: %s\n", as_strerror(ret));
-            } else {
-                printf("restored %zu bytes from %s\n", sizeof(buf), file);
-            }
+            printf("restored %zu bytes from %s\n", sizeof(buf), file);
         }
     } else if (!strcmp(sub, "raw")) {
         /* raw CMD [ADDR] [LEN] [BYTE...] */
         unsigned cmd, addr = 0, len = 0;
-        uint8_t payload[10] = { 0 };
-        uint8_t reply[16];
+        uint8_t payload[10] = { 0 }, reply[16];
+
         if (argc < 2) {
-            fprintf(stderr, "usage: attackshark mouse raw CMD [ADDR] [LEN] "
-                            "[BYTES...]\n");
-            as_mouse_close(&m);
-            return 2;
+            return mouse_usage(&m, "raw", "CMD [ADDR] [LEN] [BYTES...]");
         }
         sscanf(argv[1], "%x", &cmd);
-        if (argc > 2) sscanf(argv[2], "%x", &addr);
-        if (argc > 3) sscanf(argv[3], "%x", &len);
+        if (argc > 2) {
+            sscanf(argv[2], "%x", &addr);
+        }
+        if (argc > 3) {
+            sscanf(argv[3], "%x", &len);
+        }
         for (int i = 4; i < argc && i - 4 < 10; i++) {
             unsigned b;
+
             sscanf(argv[i], "%x", &b);
             payload[i - 4] = (uint8_t)b;
         }
         ret = as_mouse_raw(&m, (uint8_t)cmd, addr, payload, len, reply);
         if (ret < 0) {
-            fprintf(stderr, "attackshark: %s\n", as_strerror(ret));
+            report(ret);
         } else {
             for (int i = 0; i < 16; i++) {
                 printf("%02x ", reply[i]);
@@ -643,6 +651,13 @@ static int cmd_mouse(int argc, char **argv)
 }
 
 /* ---------------------------- keyboard ---------------------------- */
+
+static int kb_usage(struct as_keyboard *kb, const char *what, const char *args)
+{
+    fprintf(stderr, "usage: attackshark keyboard %s %s\n", what, args);
+    as_keyboard_close(kb);
+    return 2;
+}
 
 static void print_kb_light(const struct as_kb_state *st)
 {
@@ -666,6 +681,129 @@ static void print_kb_side_light(const struct as_kb_light *l)
     printf("side color  %02x%02x%02x\n", l->r, l->g, l->b);
 }
 
+static int light_has_opts(int argc, char **argv)
+{
+    return opt_value(argc, argv, "--mode") ||
+           opt_value(argc, argv, "--color") ||
+           opt_value(argc, argv, "--brightness") ||
+           opt_value(argc, argv, "--speed") ||
+           opt_value(argc, argv, "--option");
+}
+
+/* Applies the --light options to l; returns -1 and complains on bad input. */
+static int parse_light_opts(int argc, char **argv, struct as_kb_light *l)
+{
+    const char *mode = opt_value(argc, argv, "--mode");
+    const char *color = opt_value(argc, argv, "--color");
+    const char *brightness = opt_value(argc, argv, "--brightness");
+    const char *speed = opt_value(argc, argv, "--speed");
+    const char *option = opt_value(argc, argv, "--option");
+
+    if (mode) {
+        int m = as_light_mode_by_name(mode);
+
+        if (m < 0) {
+            fprintf(stderr, "attackshark: unknown light mode '%s'\n", mode);
+            return -1;
+        }
+        l->mode = (uint8_t)m;
+    }
+    if (color && parse_color(color, &l->r, &l->g, &l->b) < 0) {
+        fprintf(stderr, "attackshark: color must be RRGGBB\n");
+        return -1;
+    }
+    if (brightness) {
+        l->brightness = atoi(brightness);
+    }
+    if (speed) {
+        l->speed = atoi(speed);
+    }
+    if (option) {
+        l->option = atoi(option);
+    }
+    if (opt_flag(argc, argv, "--no-dazzle")) {
+        l->dazzle = 0;
+    }
+    return 0;
+}
+
+static void print_kb_light_json(const struct as_kb_state *st)
+{
+    printf("{\"on\":%d,\"mode\":%d,\"name\":\"%s\",\"brightness\":%d,"
+           "\"speed\":%d,\"color\":\"%02x%02x%02x\",\"option\":%d,"
+           "\"dazzle\":%d}\n", st->light_on, st->light.mode,
+           as_light_mode_name(st->light.mode), st->light.brightness,
+           st->light.speed, st->light.r, st->light.g, st->light.b,
+           st->light.option, st->light.dazzle);
+}
+
+static void kb_info_json(const struct as_keyboard *kb,
+                         const struct as_kb_state *st)
+{
+    printf("{\"product\":\"R85 HE\",\"vid\":%u,\"pid\":%u,"
+           "\"usb_version\":%u,\"revision\":%d,\"profile\":%d,"
+           "\"report_rate\":%d,\"debounce\":%d,\"mag_mode\":%d,"
+           "\"light\":{", kb->hid.vid, kb->hid.pid,
+           st->usb_version_valid ? st->usb_version : 0, st->revision,
+           st->profile, st->report_rate, st->debounce, st->mag_mode);
+    if (st->light.valid) {
+        printf("\"on\":%d,\"mode\":%d,\"brightness\":%d,\"speed\":%d,"
+               "\"color\":\"%02x%02x%02x\",\"dazzle\":%d", st->light_on,
+               st->light.mode, st->light.brightness, st->light.speed,
+               st->light.r, st->light.g, st->light.b, st->light.dazzle);
+    }
+    if (st->side_light.valid) {
+        printf("},\"side_light\":{\"mode\":%d,\"brightness\":%d,"
+               "\"speed\":%d,\"color\":\"%02x%02x%02x\",\"dazzle\":%d",
+               st->side_light.mode, st->side_light.brightness,
+               st->side_light.speed, st->side_light.r, st->side_light.g,
+               st->side_light.b, st->side_light.dazzle);
+    }
+    printf("}}\n");
+}
+
+static void kb_info_text(const struct as_keyboard *kb,
+                         const struct as_kb_state *st)
+{
+    printf("device         R85 HE\n");
+    printf("usb            %04x:%04x  %s\n", kb->hid.vid, kb->hid.pid,
+           kb->hid.path);
+    if (st->usb_version_valid) {
+        printf("firmware       %u\n", st->usb_version);
+    }
+    if (st->revision_valid) {
+        printf("revision       %d\n", st->revision);
+    }
+    printf("profile        %d\n", st->profile);
+    printf("report rate    %d Hz\n", st->report_rate);
+    printf("debounce       %d ms\n", st->debounce);
+    if (st->mag_mode >= 0) {
+        printf("magnet mode    %s\n", mag_mode_names[st->mag_mode & 3]);
+    }
+    if (!st->light.valid) {
+        return;
+    }
+    printf("light\n");
+    printf("  state        %s\n", st->light_on == 0 ? "off" :
+                                  st->light_on > 0 ? "on" : "unknown");
+    printf("  mode         %d (%s)\n", st->light.mode,
+           as_light_mode_name(st->light.mode));
+    printf("  brightness   %d\n", st->light.brightness);
+    printf("  speed        %d\n", st->light.speed);
+    printf("  color        %02x%02x%02x\n", st->light.r, st->light.g,
+           st->light.b);
+    if (!st->side_light.valid) {
+        return;
+    }
+    printf("side light\n");
+    printf("  mode         %d (%s)\n", st->side_light.mode,
+           as_light_mode_name(st->side_light.mode));
+    printf("  brightness   %d\n", st->side_light.brightness);
+    printf("  speed        %d\n", st->side_light.speed);
+    printf("  color        %02x%02x%02x\n", st->side_light.r,
+           st->side_light.g, st->side_light.b);
+}
+
 static volatile sig_atomic_t stop_stream;
 
 static void on_sigint(int sig)
@@ -678,7 +816,7 @@ static void stream_analog(struct as_keyboard *kb, int seconds)
 {
     struct sigaction sa = { 0 };
     unsigned char buf[64];
-    long deadline = 0;
+    long deadline = seconds > 0 ? (long)seconds * 1000 : 0;
 
     sa.sa_handler = on_sigint;
     sigaction(SIGINT, &sa, NULL);
@@ -694,14 +832,12 @@ static void stream_analog(struct as_keyboard *kb, int seconds)
         return;
     }
 
-    if (seconds > 0) {
-        deadline = (long)seconds * 1000;
-    }
     printf("watching key travel, press Ctrl-C to stop\n");
     fflush(stdout);
 
     while (!stop_stream) {
         int ret = as_hid_read(&kb->analog, buf, sizeof(buf), 500);
+
         if (ret == -ETIMEDOUT) {
             if (deadline && (deadline -= 500) <= 0) {
                 break;
@@ -717,8 +853,8 @@ static void stream_analog(struct as_keyboard *kb, int seconds)
         for (int i = 1; i + 3 < ret; i++) {
             if (buf[i] == 0x1b) {
                 int raw = buf[i + 1] | (buf[i + 2] << 8);
-                int key = buf[i + 3];
-                printf("key %3d  raw %4d  %.2f mm\n", key, raw,
+
+                printf("key %3d  raw %4d  %.2f mm\n", buf[i + 3], raw,
                        raw / 350.0 * 3.4);
                 fflush(stdout);
                 i += 3;
@@ -728,24 +864,32 @@ static void stream_analog(struct as_keyboard *kb, int seconds)
     as_keyboard_enable_stream(kb, 0);
 }
 
+/* Clamped key count for the raw Hall-effect table commands. */
+static unsigned kb_key_count(int argc, char **argv, int index)
+{
+    unsigned count = argc > index ? (unsigned)atoi(argv[index]) : 128;
+
+    return count > 128 ? 128 : count;
+}
+
 static int cmd_keyboard(int argc, char **argv)
 {
     struct as_keyboard kb;
     const char *sub = argc > 0 ? argv[0] : "info";
     struct as_kb_state st;
-    int ret = 0;
+    int ret;
 
     ret = as_keyboard_open(&kb);
     if (ret < 0) {
-        struct as_hid bt;
+        struct as_hid bluetooth;
 
-        if (ret == -ENOTSUP && as_keyboard_find_bluetooth(&bt)) {
-            fprintf(stderr, "attackshark: R85 HE at %s, but %s\n", bt.path,
-                    as_strerror(ret));
+        if (ret == -ENOTSUP && as_keyboard_find_bluetooth(&bluetooth)) {
+            fprintf(stderr, "attackshark: R85 HE at %s, but %s\n",
+                    bluetooth.path, as_strerror(ret));
         } else if (ret == -ENODEV) {
             fprintf(stderr, "attackshark: keyboard not found\n");
         } else {
-            fprintf(stderr, "attackshark: %s\n", as_strerror(ret));
+            report(ret);
             if (ret == -EACCES) {
                 note_udev();
             }
@@ -768,160 +912,55 @@ static int cmd_keyboard(int argc, char **argv)
             return 1;
         }
         if (json_mode) {
-            printf("{\"product\":\"R85 HE\",\"vid\":%u,\"pid\":%u,"
-                   "\"usb_version\":%u,\"revision\":%d,\"profile\":%d,"
-                   "\"report_rate\":%d,\"debounce\":%d,\"mag_mode\":%d,"
-                   "\"light\":{",
-                   kb.hid.vid, kb.hid.pid,
-                   st.usb_version_valid ? st.usb_version : 0,
-                   st.revision, st.profile, st.report_rate, st.debounce,
-                   st.mag_mode);
-            if (st.light.valid) {
-                printf("\"on\":%d,\"mode\":%d,\"brightness\":%d,\"speed\":%d,"
-                       "\"color\":\"%02x%02x%02x\",\"dazzle\":%d",
-                       st.light_on, st.light.mode, st.light.brightness,
-                       st.light.speed, st.light.r, st.light.g, st.light.b,
-                       st.light.dazzle);
-            }
-            if (st.side_light.valid) {
-                printf("},\"side_light\":{\"mode\":%d,\"brightness\":%d,"
-                       "\"speed\":%d,\"color\":\"%02x%02x%02x\","
-                       "\"dazzle\":%d",
-                       st.side_light.mode, st.side_light.brightness,
-                       st.side_light.speed, st.side_light.r, st.side_light.g,
-                       st.side_light.b, st.side_light.dazzle);
-            }
-            printf("}}\n");
+            kb_info_json(&kb, &st);
         } else {
-            printf("device         R85 HE\n");
-            printf("usb            %04x:%04x  %s\n", kb.hid.vid, kb.hid.pid,
-                   kb.hid.path);
-            if (st.usb_version_valid) {
-                printf("firmware       %u\n", st.usb_version);
-            }
-            if (st.revision_valid) {
-                printf("revision       %d\n", st.revision);
-            }
-            printf("profile        %d\n", st.profile);
-            printf("report rate    %d Hz\n", st.report_rate);
-            printf("debounce       %d ms\n", st.debounce);
-            if (st.mag_mode >= 0) {
-                printf("magnet mode    %s\n", mag_mode_names[st.mag_mode & 3]);
-            }
-            if (st.light.valid) {
-                printf("light\n");
-                printf("  state        %s\n", st.light_on == 0 ? "off" :
-                                              st.light_on > 0 ? "on" :
-                                                               "unknown");
-                printf("  mode         %d (%s)\n", st.light.mode,
-                       as_light_mode_name(st.light.mode));
-                printf("  brightness   %d\n", st.light.brightness);
-                printf("  speed        %d\n", st.light.speed);
-                printf("  color        %02x%02x%02x\n", st.light.r, st.light.g,
-                       st.light.b);
-                if (st.side_light.valid) {
-                    printf("side light\n");
-                    printf("  mode         %d (%s)\n", st.side_light.mode,
-                           as_light_mode_name(st.side_light.mode));
-                    printf("  brightness   %d\n", st.side_light.brightness);
-                    printf("  speed        %d\n", st.side_light.speed);
-                    printf("  color        %02x%02x%02x\n", st.side_light.r,
-                           st.side_light.g, st.side_light.b);
-                }
-            }
+            kb_info_text(&kb, &st);
         }
     } else if (!strcmp(sub, "light")) {
-        const char *mode = opt_value(argc, argv, "--mode");
-        const char *color = opt_value(argc, argv, "--color");
-        const char *brightness = opt_value(argc, argv, "--brightness");
-        const char *speed = opt_value(argc, argv, "--speed");
-        const char *option = opt_value(argc, argv, "--option");
-        int have_power = 0, power_on = 0;
+        int on = 1;
+        int have_power = light_power_arg(argc, argv, &on);
 
-        for (int i = 1; i < argc; i++) {
-            if (!strcmp(argv[i], "on") || !strcmp(argv[i], "off")) {
-                have_power = 1;
-                power_on = argv[i][1] == 'n';
-            }
-        }
-
-        if (!mode && !color && !brightness && !speed && !option && !have_power) {
+        if (!light_has_opts(argc, argv) && !have_power) {
             ret = as_keyboard_read_state(&kb, &st);
             if (ret == 0 && st.light.valid) {
                 if (json_mode) {
-                    printf("{\"on\":%d,\"mode\":%d,\"name\":\"%s\","
-                           "\"brightness\":%d,\"speed\":%d,"
-                           "\"color\":\"%02x%02x%02x\",\"option\":%d,"
-                           "\"dazzle\":%d}\n",
-                           st.light_on, st.light.mode,
-                           as_light_mode_name(st.light.mode),
-                           st.light.brightness, st.light.speed, st.light.r,
-                           st.light.g, st.light.b, st.light.option,
-                           st.light.dazzle);
+                    print_kb_light_json(&st);
                 } else {
                     print_kb_light(&st);
                 }
             } else {
-                fprintf(stderr, "attackshark: %s\n", as_strerror(ret));
+                report(ret);
             }
         } else {
             struct as_kb_light l = { .valid = 1, .mode = 1, .speed = 2,
-                                     .brightness = 4, .option = 0, .dazzle = 1,
-                                     .r = 0xff, .g = 0, .b = 0 };
-            if (mode) {
-                int m = as_light_mode_by_name(mode);
-                if (m < 0) {
-                    fprintf(stderr, "attackshark: unknown light mode '%s'\n", mode);
-                    as_keyboard_close(&kb);
-                    return 2;
-                }
-                l.mode = (uint8_t)m;
-            }
-            if (color && parse_color(color, &l.r, &l.g, &l.b) < 0) {
-                fprintf(stderr, "attackshark: color must be RRGGBB\n");
+                                     .brightness = 4, .dazzle = 1, .r = 0xff };
+
+            if (parse_light_opts(argc, argv, &l) < 0) {
                 as_keyboard_close(&kb);
                 return 2;
             }
-            if (brightness) {
-                l.brightness = atoi(brightness);
-            }
-            if (speed) {
-                l.speed = atoi(speed);
-            }
-            if (option) {
-                l.option = atoi(option);
-            }
-            if (opt_flag(argc, argv, "--no-dazzle")) {
-                l.dazzle = 0;
-            }
             ret = as_keyboard_set_light(&kb, &l);
             if (ret == 0 && have_power) {
-                ret = as_keyboard_set_light_power(&kb, power_on);
+                ret = as_keyboard_set_light_power(&kb, on);
             }
             if (ret < 0) {
-                fprintf(stderr, "attackshark: %s\n", as_strerror(ret));
+                report(ret);
             } else if (!json_mode) {
                 printf("light updated\n");
             }
         }
     } else if (!strcmp(sub, "side-light")) {
-        const char *mode = opt_value(argc, argv, "--mode");
-        const char *color = opt_value(argc, argv, "--color");
-        const char *brightness = opt_value(argc, argv, "--brightness");
-        const char *speed = opt_value(argc, argv, "--speed");
-
         ret = as_keyboard_read_state(&kb, &st);
         if (ret < 0 || !st.side_light.valid) {
             fprintf(stderr, "attackshark: side light is not available\n");
             as_keyboard_close(&kb);
             return 1;
         }
-        if (!mode && !color && !brightness && !speed) {
+        if (!light_has_opts(argc, argv)) {
             if (json_mode) {
                 printf("{\"mode\":%d,\"name\":\"%s\",\"brightness\":%d,"
                        "\"speed\":%d,\"color\":\"%02x%02x%02x\","
-                       "\"dazzle\":%d}\n",
-                       st.side_light.mode,
+                       "\"dazzle\":%d}\n", st.side_light.mode,
                        as_light_mode_name(st.side_light.mode),
                        st.side_light.brightness, st.side_light.speed,
                        st.side_light.r, st.side_light.g, st.side_light.b,
@@ -932,74 +971,42 @@ static int cmd_keyboard(int argc, char **argv)
         } else {
             struct as_kb_light l = st.side_light;
 
-            if (mode) {
-                int m = as_light_mode_by_name(mode);
-                if (m < 0) {
-                    fprintf(stderr, "attackshark: unknown light mode '%s'\n",
-                            mode);
-                    as_keyboard_close(&kb);
-                    return 2;
-                }
-                l.mode = (uint8_t)m;
-            }
-            if (color && parse_color(color, &l.r, &l.g, &l.b) < 0) {
-                fprintf(stderr, "attackshark: color must be RRGGBB\n");
+            if (parse_light_opts(argc, argv, &l) < 0) {
                 as_keyboard_close(&kb);
                 return 2;
             }
-            if (brightness) {
-                l.brightness = atoi(brightness);
-            }
-            if (speed) {
-                l.speed = atoi(speed);
-            }
-            if (opt_flag(argc, argv, "--no-dazzle")) {
-                l.dazzle = 0;
-            }
             ret = as_keyboard_set_sidelight(&kb, &l);
             if (ret < 0) {
-                fprintf(stderr, "attackshark: %s\n", as_strerror(ret));
+                report(ret);
             } else if (!json_mode) {
                 printf("side light updated\n");
             }
         }
-    } else if (!strcmp(sub, "rate")) {
-        int hz;
-        if (argc < 2 || sscanf(argv[1], "%d", &hz) != 1) {
-            fprintf(stderr, "usage: attackshark keyboard rate HZ\n");
-            as_keyboard_close(&kb);
-            return 2;
+    } else if (!strcmp(sub, "rate") || !strcmp(sub, "profile") ||
+               !strcmp(sub, "debounce")) {
+        int value;
+
+        if (argc < 2 || sscanf(argv[1], "%d", &value) != 1) {
+            return kb_usage(&kb, sub, sub[0] == 'r' ? "HZ" :
+                                        sub[0] == 'p' ? "N" : "MS");
         }
-        ret = as_keyboard_set_report_rate(&kb, hz);
-        if (ret < 0) {
-            fprintf(stderr, "attackshark: unsupported rate\n");
-        } else if (!json_mode) {
-            printf("report rate set to %d Hz\n", hz);
-        }
-    } else if (!strcmp(sub, "profile")) {
-        int profile;
-        if (argc < 2 || sscanf(argv[1], "%d", &profile) != 1) {
-            fprintf(stderr, "usage: attackshark keyboard profile N\n");
-            as_keyboard_close(&kb);
-            return 2;
-        }
-        ret = as_keyboard_set_profile(&kb, profile);
-        if (ret < 0) {
-            fprintf(stderr, "attackshark: %s\n", as_strerror(ret));
-        }
-    } else if (!strcmp(sub, "debounce")) {
-        int ms;
-        if (argc < 2 || sscanf(argv[1], "%d", &ms) != 1) {
-            fprintf(stderr, "usage: attackshark keyboard debounce MS\n");
-            as_keyboard_close(&kb);
-            return 2;
-        }
-        ret = as_keyboard_set_debounce(&kb, ms);
-        if (ret < 0) {
-            fprintf(stderr, "attackshark: %s\n", as_strerror(ret));
+        if (sub[0] == 'r') {
+            ret = as_keyboard_set_report_rate(&kb, value);
+            if (ret < 0) {
+                fprintf(stderr, "attackshark: unsupported rate\n");
+            } else if (!json_mode) {
+                printf("report rate set to %d Hz\n", value);
+            }
+        } else {
+            ret = sub[0] == 'p' ? as_keyboard_set_profile(&kb, value)
+                                : as_keyboard_set_debounce(&kb, value);
+            if (ret < 0) {
+                report(ret);
+            }
         }
     } else if (!strcmp(sub, "magmode")) {
         int mode = -1;
+
         if (argc > 1) {
             for (int i = 0; i < 4; i++) {
                 if (!strcmp(argv[1], mag_mode_names[i])) {
@@ -1011,14 +1018,12 @@ static int cmd_keyboard(int argc, char **argv)
             }
         }
         if (mode < 0 || mode > 3) {
-            fprintf(stderr, "usage: attackshark keyboard magmode "
-                            "comfort|sensitive|gaming|custom\n");
-            as_keyboard_close(&kb);
-            return 2;
+            return kb_usage(&kb, "magmode",
+                            "comfort|sensitive|gaming|custom");
         }
         ret = as_keyboard_set_mag_mode(&kb, mode);
         if (ret < 0) {
-            fprintf(stderr, "attackshark: %s\n", as_strerror(ret));
+            report(ret);
         }
     } else if (!strcmp(sub, "travel")) {
         const char *act = opt_value(argc, argv, "--actuation");
@@ -1026,7 +1031,8 @@ static int cmd_keyboard(int argc, char **argv)
         const char *rtp = opt_value(argc, argv, "--rt-press");
         const char *rtr = opt_value(argc, argv, "--rt-release");
         const char *dz = opt_value(argc, argv, "--deadzone");
-        int rt = opt_flag(argc, argv, "--rt") || opt_flag(argc, argv, "--rapid-trigger");
+        int rt = opt_flag(argc, argv, "--rt") ||
+                 opt_flag(argc, argv, "--rapid-trigger");
         double actuation = act ? atof(act) : 1.5;
         double release = rel ? atof(rel) : actuation;
         double rt_press = rtp ? atof(rtp) : 0.2;
@@ -1035,11 +1041,12 @@ static int cmd_keyboard(int argc, char **argv)
 
         if (!act && !rel && !rtp && !rtr && !dz && !rt) {
             int32_t act_v[128], rel_v[128], dz_v[128], opt_v[128];
-            int r0 = as_keyboard_get_param(&kb, AS_K_MAG_ACTUATION, act_v, 128);
-            int r1 = as_keyboard_get_param(&kb, AS_K_MAG_RELEASE, rel_v, 128);
-            int r2 = as_keyboard_get_param(&kb, AS_K_MAG_DEADZONE, dz_v, 128);
-            int r3 = as_keyboard_get_param(&kb, AS_K_MAG_OPTION, opt_v, 128);
-            if (r0 || r1 || r2 || r3) {
+            int rc = as_keyboard_get_param(&kb, AS_K_MAG_ACTUATION, act_v, 128) ||
+                     as_keyboard_get_param(&kb, AS_K_MAG_RELEASE, rel_v, 128) ||
+                     as_keyboard_get_param(&kb, AS_K_MAG_DEADZONE, dz_v, 128) ||
+                     as_keyboard_get_param(&kb, AS_K_MAG_OPTION, opt_v, 128);
+
+            if (rc) {
                 fprintf(stderr, "attackshark: cannot read travel settings\n");
                 as_keyboard_close(&kb);
                 return 1;
@@ -1063,56 +1070,46 @@ static int cmd_keyboard(int argc, char **argv)
         ret = as_keyboard_set_travel(&kb, rt, actuation, release, rt_press,
                                      rt_release, deadzone);
         if (ret < 0) {
-            fprintf(stderr, "attackshark: %s\n", as_strerror(ret));
+            report(ret);
         } else if (!json_mode) {
             printf("travel applied to all keys (actuation %.2f mm, "
                    "rapid trigger %s)\n", actuation, rt ? "on" : "off");
         }
     } else if (!strcmp(sub, "multi-set")) {
-        int param;
-        long value;
         int32_t values[128];
+        long value;
+        int param;
+        unsigned count;
+
         if (argc < 3 || sscanf(argv[1], "%d", &param) != 1 ||
             sscanf(argv[2], "%ld", &value) != 1) {
-            fprintf(stderr, "usage: attackshark keyboard multi-set PARAM VALUE "
-                            "[COUNT]\n");
-            as_keyboard_close(&kb);
-            return 2;
+            return kb_usage(&kb, "multi-set", "PARAM VALUE [COUNT]");
         }
-        unsigned count = argc > 3 ? (unsigned)atoi(argv[3]) : 128;
-        if (count > sizeof(values)) {
-            count = sizeof(values);
-        }
+        count = kb_key_count(argc, argv, 3);
         for (unsigned i = 0; i < count; i++) {
             values[i] = (int32_t)value;
         }
         ret = as_keyboard_set_param(&kb, param, values, count, 1);
         if (ret < 0) {
-            fprintf(stderr, "attackshark: %s\n", as_strerror(ret));
+            report(ret);
         } else if (!json_mode) {
             printf("param %d set to %ld for %u keys\n", param, value, count);
         }
     } else if (!strcmp(sub, "multi")) {
-        int param;
-        unsigned count = 128;
         int32_t values[128];
+        int param, is_option;
+        unsigned count;
+
         if (argc < 2 || sscanf(argv[1], "%d", &param) != 1) {
-            fprintf(stderr, "usage: attackshark keyboard multi PARAM [COUNT]\n");
-            as_keyboard_close(&kb);
-            return 2;
+            return kb_usage(&kb, "multi", "PARAM [COUNT]");
         }
-        if (argc > 2) {
-            count = (unsigned)atoi(argv[2]);
-        }
-        if (count > sizeof(values)) {
-            count = sizeof(values);
-        }
+        count = kb_key_count(argc, argv, 2);
         ret = as_keyboard_get_param(&kb, param, values, count);
         if (ret < 0) {
-            fprintf(stderr, "attackshark: %s\n", as_strerror(ret));
+            report(ret);
         } else {
-            int is_option = param == AS_K_MAG_OPTION ||
-                            param == AS_K_MAG_SOCD_PAIR;
+            is_option = param == AS_K_MAG_OPTION ||
+                        param == AS_K_MAG_SOCD_PAIR;
             for (unsigned i = 0; i < count; i++) {
                 if (is_option) {
                     printf("%3u: %3d\n", i, values[i]);
@@ -1123,17 +1120,16 @@ static int cmd_keyboard(int argc, char **argv)
             }
         }
     } else if (!strcmp(sub, "stream")) {
-        const char *secs = opt_value(argc, argv, "--seconds");
-        stream_analog(&kb, secs ? atoi(secs) : 0);
+        const char *seconds = opt_value(argc, argv, "--seconds");
+
+        stream_analog(&kb, seconds ? atoi(seconds) : 0);
     } else if (!strcmp(sub, "reset")) {
         ret = as_keyboard_cmd(&kb, AS_K_RESET, NULL, 0, 0, NULL, 0);
         if (ret == 0) {
             sleep(3);
-        }
-        if (ret < 0) {
-            fprintf(stderr, "attackshark: %s\n", as_strerror(ret));
-        } else {
             printf("factory reset sent\n");
+        } else {
+            report(ret);
         }
     } else {
         fprintf(stderr, "unknown keyboard command: %s\n", sub);
@@ -1160,14 +1156,11 @@ static int cmd_apply(const char *file)
         return 1;
     }
     while (fgets(line, sizeof(line), f)) {
-        char *argv[16];
+        char *argv[16], *save = NULL, *tok;
         int argc = 0;
-        char *save = NULL;
-        char *tok;
 
         line[strcspn(line, "#\n")] = 0;
-        for (tok = strtok_r(line, " \t\r\n", &save);
-             tok && argc < 16;
+        for (tok = strtok_r(line, " \t\r\n", &save); tok && argc < 16;
              tok = strtok_r(NULL, " \t\r\n", &save)) {
             argv[argc++] = tok;
         }
@@ -1181,7 +1174,8 @@ static int cmd_apply(const char *file)
         }
         if (run_argv(argc, argv) != 0) {
             if (optional_mode) {
-                fprintf(stderr, "attackshark: warning: '%s' failed\n", argv[0]);
+                fprintf(stderr, "attackshark: warning: '%s' failed\n",
+                        argv[0]);
             } else {
                 ret = 1;
             }
@@ -1286,16 +1280,15 @@ int main(int argc, char **argv)
     while (i < argc) {
         if (!strcmp(argv[i], "--json")) {
             json_mode = 1;
-            i++;
         } else if (!strcmp(argv[i], "--optional")) {
             optional_mode = 1;
-            i++;
         } else if (!strcmp(argv[i], "--help") || !strcmp(argv[i], "-h")) {
             usage();
             return 0;
         } else {
             break;
         }
+        i++;
     }
     return run_argv(argc - i, argv + i);
 }

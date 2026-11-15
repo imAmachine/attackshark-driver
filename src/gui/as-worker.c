@@ -19,19 +19,13 @@ typedef struct {
 
 static GAsyncQueue *queue;
 static GThread *thread;
-static volatile gint pending;
 
 /* g_async_queue_push() refuses NULL, so the stop request is a pointer that
  * can never be a valid job. */
 #define AS_JOB_QUIT ((gpointer)1)
 
-static gboolean job_finish(gpointer data)
+static void job_release(AsJob *job)
 {
-    AsJob *job = data;
-
-    if (job->done) {
-        job->done(job->data, job->error, job->user_data);
-    }
     if (job->error) {
         g_error_free(job->error);
     }
@@ -42,7 +36,16 @@ static gboolean job_finish(gpointer data)
         job->free_user_data(job->user_data);
     }
     g_free(job);
-    g_atomic_int_dec_and_test(&pending);
+}
+
+static gboolean job_finish(gpointer data)
+{
+    AsJob *job = data;
+
+    if (job->done) {
+        job->done(job->data, job->error, job->user_data);
+    }
+    job_release(job);
     return G_SOURCE_REMOVE;
 }
 
@@ -83,22 +86,10 @@ void as_worker_stop(void)
     thread = NULL;
 
     while ((job = g_async_queue_try_pop(queue)) != NULL) {
-        if (job->free_data) {
-            job->free_data(job->data);
-        }
-        if (job->free_user_data) {
-            job->free_user_data(job->user_data);
-        }
-        g_free(job);
-        g_atomic_int_dec_and_test(&pending);
+        job_release(job);
     }
     g_async_queue_unref(queue);
     queue = NULL;
-}
-
-guint as_worker_pending(void)
-{
-    return (guint)g_atomic_int_get(&pending);
 }
 
 void as_job_run(AsJobFunc func, gpointer data, AsJobFreeFunc free_data,
@@ -115,7 +106,5 @@ void as_job_run(AsJobFunc func, gpointer data, AsJobFreeFunc free_data,
     job->done = done;
     job->user_data = user_data;
     job->free_user_data = free_user_data;
-
-    g_atomic_int_inc(&pending);
     g_async_queue_push(queue, job);
 }

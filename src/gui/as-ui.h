@@ -30,7 +30,14 @@ unsigned as_ui_snap_dpi(unsigned dpi);
 
 AdwActionRow *as_ui_value_row(const char *title);
 void as_ui_row_set_value(AdwActionRow *row, const char *value);
+/* Sets a row subtitle from a printf format. */
+void as_ui_row_format(AdwActionRow *row, const char *fmt, ...)
+    G_GNUC_PRINTF(2, 3);
 AdwSwitchRow *as_ui_switch_row(const char *title, const char *subtitle);
+AdwPreferencesGroup *as_ui_group(const char *title, const char *description);
+AdwComboRow *as_ui_combo(const char *title, GListModel *model);
+AdwSpinRow *as_ui_spin(const char *title, double min, double max, double step,
+                       const char *subtitle);
 
 /* Setting a value programmatically must not loop back into a device write. */
 void as_ui_combo_set(AdwComboRow *row, gboolean *guard, int index);
@@ -44,6 +51,34 @@ char *as_ui_keyboard_summary(const AsDevice *dev);
 /* One-line explanation for a page banner or a row. The permission problem can
  * be solved from inside the app, so it must not read like a dead end. */
 const char *as_ui_error(const AsDevice *dev);
+
+/* Device pages, one per family. */
+GtkWidget *as_mouse_page_new(AsStore *store, const char *path);
+GtkWidget *as_keyboard_page_new(AsStore *store, const char *path);
+
+/* --------------------------- device pages --------------------------- */
+
+/* State every device page shares: its snapshot source and the coalesced
+ * write queue (a dragged slider must not send one EEPROM write per step). */
+typedef struct {
+    AsStore *store;
+    char *path;
+    AdwBanner *banner;
+    gboolean updating;
+    guint pending_id;
+    AsOpRequest pending;
+    gboolean pending_valid;
+} AsPage;
+
+/* Builds the page skeleton (banner + preferences page) and owns the state. */
+void as_page_attach(AsPage *page, GtkWidget *box, AdwPreferencesPage *prefs,
+                    AsStore *store, const char *path);
+AsDevice *as_page_device(AsPage *page);
+/* NULL hides the banner, any text reveals it. */
+void as_page_banner(AsPage *page, const char *text);
+void as_page_queue(AsPage *page, const AsOpRequest *req);
+void as_page_flush(AsPage *page);
+void as_page_free(AsPage *page);
 
 G_END_DECLS
 

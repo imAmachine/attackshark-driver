@@ -247,6 +247,7 @@ src/hidraw.c            поиск hidraw-узлов, feature/interrupt обме
 src/mouse.c             протокол мыши (Control HUB)
 src/keyboard.c          протокол клавиатуры (GearHub)
 src/util.c              строки ошибок, названия моделей и режимов
+src/internal.h          внутренние помощники (поиск узлов, сканирование)
 src/udev.c              правила udev: текст, установка, проверка состояния
 src/main.c              CLI
 src/gui/                GUI на GTK4 (воркер, реестр устройств, страницы)

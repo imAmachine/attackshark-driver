@@ -29,11 +29,6 @@ struct as_hid {
     int fd;
 };
 
-/* Discover hidraw nodes whose report descriptor matches the given probe
- * sequence. Returns the number of matches written to out (max max). */
-int as_hid_find(const unsigned char *probe, size_t probe_len,
-                struct as_hid *out, int max);
-
 /* Collapses the hidraw nodes of one composite device into one entry.
  * A keyboard such as the R85 HE is a composite USB device: the firmware
  * publishes the boot keyboard, the consumer/system keys and the vendor
@@ -74,7 +69,6 @@ struct as_mouse {
     uint8_t cid;
     uint8_t mid;
     uint8_t type;
-    uint8_t type_offset;
     uint8_t version_major;
     uint8_t version_minor;
     uint8_t dongle_version[3];
@@ -131,14 +125,13 @@ struct as_mouse_state {
     int report_rate;
     int dpi_stages;
     int active_dpi_stage;
-    unsigned dpi[AS_MAX_DPI_STAGES][2];
+    unsigned dpi[AS_MAX_DPI_STAGES];
     int lod;
     int debounce;
     int motion_sync;
     int angle_snap;
     int ripple;
     int sleep_time;
-    int sensor_mode;
     int profile;
     int version_valid;
     int version_major;
@@ -151,7 +144,6 @@ struct as_mouse_state {
     int light_brightness;
     int light_on;
     uint8_t light_color[3];
-    uint8_t light[9];
     uint8_t raw[AS_MOUSE_CONFIG_LEN];
 };
 
