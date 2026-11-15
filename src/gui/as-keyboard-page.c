@@ -263,8 +263,12 @@ static void update_page(AsKeyboardPage *p)
         gtk_widget_set_sensitive(GTK_WIDGET(p->row_side_mode), side_on);
         gtk_widget_set_sensitive(GTK_WIDGET(p->row_side_bright), side_on);
         gtk_widget_set_sensitive(GTK_WIDGET(p->row_side_speed), side_on);
-        gtk_widget_set_sensitive(GTK_WIDGET(p->sw_side_dazzle), side_on);
-        gtk_widget_set_sensitive(GTK_WIDGET(p->side_color), side_on);
+        gtk_widget_set_sensitive(GTK_WIDGET(p->sw_side_light), light_on);
+        gtk_widget_set_sensitive(GTK_WIDGET(p->row_side_mode), light_on && side_on);
+        gtk_widget_set_sensitive(GTK_WIDGET(p->row_side_bright), light_on && side_on);
+        gtk_widget_set_sensitive(GTK_WIDGET(p->row_side_speed), light_on && side_on);
+        gtk_widget_set_sensitive(GTK_WIDGET(p->sw_side_dazzle), light_on && side_on);
+        gtk_widget_set_sensitive(GTK_WIDGET(p->side_color), light_on && side_on);
     }
     p->page.updating = FALSE;
 }
