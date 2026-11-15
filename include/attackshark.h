@@ -341,6 +341,13 @@ int as_keyboard_set_key_travel(struct as_keyboard *kb, int key,
                                int rapid_trigger, double actuation,
                                double release, double rt_press,
                                double rt_release, double deadzone);
+/* Applies one travel setting to the keys marked in selected (one byte per
+ * matrix position). One bulk pass instead of one command per key. */
+int as_keyboard_set_keys_travel(struct as_keyboard *kb,
+                                const uint8_t *selected, int rapid_trigger,
+                                double actuation, double release,
+                                double rt_press, double rt_release,
+                                double deadzone);
 /* Reads the key code of every matrix position, so the UI can name the keys
  * instead of showing their indices. Unknown positions read as 0. */
 int as_keyboard_get_keymatrix(struct as_keyboard *kb, uint32_t *codes);

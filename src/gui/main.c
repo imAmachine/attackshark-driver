@@ -3,9 +3,30 @@
 #include <cairo.h>
 #include <string.h>
 
+#include "as-key-dialog.h"
 #include "as-store.h"
 #include "as-window.h"
 #include "as-worker.h"
+
+/* Opened from the command line, before the window exists, so the layout is
+ * only reachable once the store has found the keyboard. */
+static GtkWindow *shot_parent;
+
+static gboolean open_key_layout(gpointer data)
+{
+    GPtrArray *devices = as_store_devices(as_store_get());
+
+    (void)data;
+    for (guint i = 0; i < devices->len; i++) {
+        AsDevice *dev = devices->pdata[i];
+
+        if (dev->kind == AS_DEVICE_KEYBOARD && !dev->error[0]) {
+            as_key_dialog_open(shot_parent, as_store_get(), dev->path);
+            return G_SOURCE_REMOVE;
+        }
+    }
+    return G_SOURCE_CONTINUE;
+}
 
 /* Renders the whole window into a PNG. Useful for documentation and for
  * checking the layout without a visible session:
@@ -61,6 +82,10 @@ static void on_activate(GtkApplication *app, gpointer user_data)
     gtk_window_present(window);
     if (g_getenv("ATTACKSHARK_GUI_SHOT")) {
         g_timeout_add(4000, save_screenshot, window);
+    }
+    if (g_getenv("ATTACKSHARK_GUI_KEYDIALOG")) {
+        shot_parent = window;
+        g_timeout_add(2500, open_key_layout, NULL);
     }
 }
 

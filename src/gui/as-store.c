@@ -526,6 +526,11 @@ static int apply_keyboard(struct as_keyboard *kb, const AsOpRequest *req)
                                           req->actuation, req->release,
                                           req->rt_press, req->rt_release,
                                           req->deadzone);
+    case AS_OP_KB_KEYS_TRAVEL:
+        return as_keyboard_set_keys_travel(kb, req->keys, req->rapid_trigger,
+                                           req->actuation, req->release,
+                                           req->rt_press, req->rt_release,
+                                           req->deadzone);
     case AS_OP_KB_SNAP:
         if (req->snap_disable) {
             return as_keyboard_clear_snap(kb, req->index);
@@ -574,6 +579,18 @@ static void apply_job_run(gpointer data, GError **error)
 }
 
 /* Mirrors the request into the snapshot so the UI reacts immediately. */
+static void snapshot_key_travel(AsDevice *dev, int key, const AsOpRequest *req)
+{
+    dev->key_actuation[key] = req->actuation;
+    dev->key_release[key] = req->release;
+    dev->key_rt_press[key] = req->rt_press;
+    dev->key_rt_release[key] = req->rt_release;
+    dev->key_deadzone[key] = req->deadzone;
+    dev->key_option[key] =
+        (uint8_t)((dev->key_option[key] & ~AS_KB_OPTION_RT) |
+                  (req->rapid_trigger ? AS_KB_OPTION_RT : 0));
+}
+
 static void apply_optimistic(AsDevice *dev, const AsOpRequest *req)
 {
     switch (req->op) {
@@ -655,16 +672,14 @@ static void apply_optimistic(AsDevice *dev, const AsOpRequest *req)
         break;
     case AS_OP_KB_KEY_TRAVEL:
         if (req->index >= 0 && req->index < AS_KB_KEY_MAX) {
-            int key = req->index;
-
-            dev->key_actuation[key] = req->actuation;
-            dev->key_release[key] = req->release;
-            dev->key_rt_press[key] = req->rt_press;
-            dev->key_rt_release[key] = req->rt_release;
-            dev->key_deadzone[key] = req->deadzone;
-            dev->key_option[key] =
-                (uint8_t)((dev->key_option[key] & ~AS_KB_OPTION_RT) |
-                          (req->rapid_trigger ? AS_KB_OPTION_RT : 0));
+            snapshot_key_travel(dev, req->index, req);
+        }
+        break;
+    case AS_OP_KB_KEYS_TRAVEL:
+        for (int i = 0; i < AS_KB_KEY_MAX; i++) {
+            if (req->keys[i]) {
+                snapshot_key_travel(dev, i, req);
+            }
         }
         break;
     case AS_OP_KB_SNAP: {

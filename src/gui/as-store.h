@@ -110,6 +110,7 @@ enum {
     AS_OP_KB_MAG_MODE,
     AS_OP_KB_TRAVEL,
     AS_OP_KB_KEY_TRAVEL,
+    AS_OP_KB_KEYS_TRAVEL,
     AS_OP_KB_SNAP,
     AS_OP_KB_LIGHT,
     AS_OP_KB_LIGHT_POWER,
@@ -133,6 +134,8 @@ typedef struct {
     double rt_release;
     double deadzone;
     int rapid_trigger;
+    /* AS_OP_KB_KEYS_TRAVEL: matrix positions to change, one byte each. */
+    uint8_t keys[AS_KB_KEY_MAX];
     /* AS_OP_KB_SNAP: index is the first key, value the second, snap_mode one
      * of as_kb_snap_mode. snap_disable only clears the pair. */
     int snap_mode;

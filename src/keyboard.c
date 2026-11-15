@@ -690,6 +690,68 @@ int as_keyboard_set_key_travel(struct as_keyboard *kb, int key,
                           (int32_t[]){ option }, 1, 1);
 }
 
+int as_keyboard_set_keys_travel(struct as_keyboard *kb,
+                                const uint8_t *selected, int rapid_trigger,
+                                double actuation, double release,
+                                double rt_press, double rt_release,
+                                double deadzone)
+{
+    int32_t act = encode_value(kb, AS_K_MAG_ACTUATION, actuation);
+    int32_t rel = encode_value(kb, AS_K_MAG_RELEASE, release);
+    int32_t dz = encode_value(kb, AS_K_MAG_DEADZONE, deadzone);
+    int32_t rtp = encode_value(kb, AS_K_MAG_RT_PRESS, rt_press);
+    int32_t rtr = encode_value(kb, AS_K_MAG_RT_RELEASE, rt_release);
+    int32_t act_v[AS_KB_KEY_MAX], rel_v[AS_KB_KEY_MAX], dz_v[AS_KB_KEY_MAX];
+    int32_t rtp_v[AS_KB_KEY_MAX], rtr_v[AS_KB_KEY_MAX], opt_v[AS_KB_KEY_MAX];
+    int any = 0, ret;
+
+    if (act < 0 || rel < 0 || dz < 0 || rtp < 0 || rtr < 0) {
+        return -ENODATA;
+    }
+    if (as_keyboard_get_param(kb, AS_K_MAG_ACTUATION, act_v, AS_KB_KEY_MAX) ||
+        as_keyboard_get_param(kb, AS_K_MAG_RELEASE, rel_v, AS_KB_KEY_MAX) ||
+        as_keyboard_get_param(kb, AS_K_MAG_DEADZONE, dz_v, AS_KB_KEY_MAX) ||
+        as_keyboard_get_param(kb, AS_K_MAG_RT_PRESS, rtp_v, AS_KB_KEY_MAX) ||
+        as_keyboard_get_param(kb, AS_K_MAG_RT_RELEASE, rtr_v, AS_KB_KEY_MAX) ||
+        as_keyboard_get_param(kb, AS_K_MAG_OPTION, opt_v, AS_KB_KEY_MAX)) {
+        return -ENODATA;
+    }
+    for (int i = 0; i < AS_KB_KEY_MAX; i++) {
+        if (!selected[i]) {
+            continue;
+        }
+        any = 1;
+        act_v[i] = act;
+        rel_v[i] = rel;
+        dz_v[i] = dz;
+        if (rapid_trigger) {
+            rtp_v[i] = rtp;
+            rtr_v[i] = rtr;
+        }
+        opt_v[i] = (opt_v[i] & ~AS_KB_OPTION_RT) |
+                   (rapid_trigger ? AS_KB_OPTION_RT : 0);
+    }
+    if (!any) {
+        return 0;
+    }
+    if ((ret = as_keyboard_set_param(kb, AS_K_MAG_ACTUATION, act_v,
+                                     AS_KB_KEY_MAX, 0)) ||
+        (ret = as_keyboard_set_param(kb, AS_K_MAG_RELEASE, rel_v,
+                                     AS_KB_KEY_MAX, 0)) ||
+        (ret = as_keyboard_set_param(kb, AS_K_MAG_DEADZONE, dz_v,
+                                     AS_KB_KEY_MAX, 0))) {
+        return ret;
+    }
+    if (rapid_trigger &&
+        ((ret = as_keyboard_set_param(kb, AS_K_MAG_RT_PRESS, rtp_v,
+                                      AS_KB_KEY_MAX, 0)) ||
+         (ret = as_keyboard_set_param(kb, AS_K_MAG_RT_RELEASE, rtr_v,
+                                      AS_KB_KEY_MAX, 0)))) {
+        return ret;
+    }
+    return as_keyboard_set_param(kb, AS_K_MAG_OPTION, opt_v, AS_KB_KEY_MAX, 1);
+}
+
 static int key_mode_is_snap(int32_t option)
 {
     switch (option & AS_KB_OPTION_MODE_MASK) {
