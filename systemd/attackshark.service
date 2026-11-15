@@ -4,7 +4,7 @@ After=multi-user.target
 
 [Service]
 Type=oneshot
-ExecStart=/usr/local/bin/attackshark --optional apply /etc/attackshark.conf
+ExecStart=@BINDIR@/attackshark --optional apply /etc/attackshark.conf
 RemainAfterExit=yes
 
 [Install]

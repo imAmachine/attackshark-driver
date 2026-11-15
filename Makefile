@@ -68,7 +68,8 @@ src/gui/%.o: src/gui/%.c include/attackshark.h
 install: $(BIN)
 	install -Dm755 $(BIN) $(DESTDIR)$(BINDIR)/$(BIN)
 	install -Dm644 udev/70-attackshark.rules $(DESTDIR)$(UDEVDIR)/70-attackshark.rules
-	install -Dm644 systemd/attackshark.service $(DESTDIR)$(SYSTEMDDIR)/attackshark.service
+	sed 's|@BINDIR@|$(BINDIR)|g' systemd/attackshark.service \
+		> $(DESTDIR)$(SYSTEMDDIR)/attackshark.service
 
 install-gui: $(GUI)
 	install -Dm755 $(GUI) $(DESTDIR)$(BINDIR)/$(GUI)
