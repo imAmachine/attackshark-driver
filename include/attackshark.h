@@ -276,6 +276,10 @@ int as_keyboard_set_light(struct as_keyboard *kb, const struct as_kb_light *l);
 /* Master switch for the whole backlight ("low power mode" in the vendor
  * software): mode 0 only changes the effect, not the power state. */
 int as_keyboard_get_light_power(struct as_keyboard *kb);
+int as_keyboard_get_light_power_zones(struct as_keyboard *kb, int *main_on,
+                                      int *side_on);
+int as_keyboard_set_light_power_zones(struct as_keyboard *kb, int main_on,
+                                      int side_on);
 int as_keyboard_set_light_power(struct as_keyboard *kb, int on);
 /* Side (edge) lighting of the R85 HE. Unlike the main light, its speed byte
  * is written as-is instead of being inverted. */

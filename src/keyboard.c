@@ -418,7 +418,8 @@ int as_keyboard_get_sidelight(struct as_keyboard *kb, struct as_kb_light *l)
     return 0;
 }
 
-int as_keyboard_get_light_power(struct as_keyboard *kb)
+int as_keyboard_get_light_power_zones(struct as_keyboard *kb, int *main_on,
+                                      int *side_on)
 {
     uint8_t out[REPORT_LEN];
     int ret = as_keyboard_cmd(kb, AS_K_GET_LED_POWER, NULL, 0, 0, out,
@@ -427,15 +428,37 @@ int as_keyboard_get_light_power(struct as_keyboard *kb)
     if (ret < 0) {
         return ret;
     }
-    return out[1] == 1 ? 1 : out[1] == 0 ? 0 : -1;
+    if (main_on) {
+        *main_on = out[1] == 1 ? 1 : out[1] == 0 ? 0 : -1;
+    }
+    if (side_on) {
+        *side_on = out[2] == 1 ? 1 : out[2] == 0 ? 0 : -1;
+    }
+    return 0;
+}
+
+int as_keyboard_get_light_power(struct as_keyboard *kb)
+{
+    int main_on;
+
+    if (as_keyboard_get_light_power_zones(kb, &main_on, NULL) < 0) {
+        return -1;
+    }
+    return main_on;
+}
+
+int as_keyboard_set_light_power_zones(struct as_keyboard *kb, int main_on,
+                                      int side_on)
+{
+    uint8_t args[3] = { main_on ? 1 : 0, side_on ? 1 : 0, 0 };
+
+    return as_keyboard_cmd(kb, AS_K_SET_LED_POWER, args, sizeof(args), 0, NULL,
+                           0);
 }
 
 int as_keyboard_set_light_power(struct as_keyboard *kb, int on)
 {
-    uint8_t args[3] = { on ? 1 : 0, 1, 0 };
-
-    return as_keyboard_cmd(kb, AS_K_SET_LED_POWER, args, sizeof(args), 0, NULL,
-                           0);
+    return as_keyboard_set_light_power_zones(kb, on, 1);
 }
 
 /* ---------- settings ---------- */

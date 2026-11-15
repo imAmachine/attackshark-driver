@@ -480,16 +480,19 @@ static int apply_keyboard(struct as_keyboard *kb, const AsOpRequest *req)
                                       req->rt_release, req->deadzone);
     case AS_OP_KB_SIDE_LIGHT:
         request_light(req, &light);
-        return as_keyboard_set_sidelight(kb, &light);
+        if (as_keyboard_set_sidelight(kb, &light) < 0) {
+            return -EIO;
+        }
+        return as_keyboard_set_light_power_zones(kb, 1, req->light_mode != 0);
     case AS_OP_KB_LIGHT:
         request_light(req, &light);
         if (req->light_mode == 0) {
             if (as_keyboard_set_light(kb, &light) < 0) {
                 return -EIO;
             }
-            return as_keyboard_set_light_power(kb, 0);
+            return as_keyboard_set_light_power_zones(kb, 0, 1);
         }
-        if (as_keyboard_set_light_power(kb, 1) < 0) {
+        if (as_keyboard_set_light_power_zones(kb, 1, 1) < 0) {
             return -EIO;
         }
         return as_keyboard_set_light(kb, &light);
