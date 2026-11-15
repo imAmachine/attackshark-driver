@@ -226,6 +226,8 @@ int as_keyboard_precision(struct as_keyboard *kb)
 
 static int param_width(struct as_keyboard *kb, int param)
 {
+    int precision;
+
     switch (param) {
     case AS_K_MAG_OPTION:
     case AS_K_MAG_SOCD_PAIR:
@@ -233,7 +235,8 @@ static int param_width(struct as_keyboard *kb, int param)
     case AS_K_MAG_DKS_FLAGS:
         return 4;
     default:
-        return as_keyboard_precision(kb) >= 100 ? 2 : 1;
+        precision = as_keyboard_precision(kb);
+        return precision < 0 ? precision : precision >= 100 ? 2 : 1;
     }
 }
 
