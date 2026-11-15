@@ -179,6 +179,140 @@ AdwComboRow *as_ui_combo(const char *title, GListModel *model)
     return row;
 }
 
+/* ------------------------------ slider row ----------------------------- */
+
+typedef struct {
+    double min, max, step;
+    double *value;
+    void (*changed)(gpointer);
+    gpointer user_data;
+    GtkScale *scale;
+    AdwActionRow *row;
+} SliderData;
+
+static void slider_show(SliderData *s)
+{
+    char buf[32];
+
+    g_snprintf(buf, sizeof(buf), "%.2f мм", *s->value);
+    adw_action_row_set_subtitle(s->row, buf);
+    if (gtk_range_get_value(GTK_RANGE(s->scale)) != *s->value) {
+        gtk_range_set_value(GTK_RANGE(s->scale), *s->value);
+    }
+}
+
+static void slider_changed(GtkRange *range, gpointer data)
+{
+    SliderData *s = data;
+    double value = gtk_range_get_value(range);
+
+    if (value == *s->value) {
+        return;
+    }
+    *s->value = value;
+    slider_show(s);
+    if (s->changed) {
+        s->changed(s->user_data);
+    }
+}
+
+static void slider_step(GtkButton *button, gpointer data)
+{
+    SliderData *s = data;
+    double delta = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(button),
+                                                     "as-delta")) * s->step;
+    double value = *s->value + delta;
+
+    if (value < s->min) {
+        value = s->min;
+    }
+    if (value > s->max) {
+        value = s->max;
+    }
+    /* Keep steps on the grid so the same button always adds the same amount. */
+    value = s->min + ((int)((value - s->min) / s->step + 0.5)) * s->step;
+    if (value < s->min) {
+        value = s->min;
+    }
+    if (value > s->max) {
+        value = s->max;
+    }
+    if (value == *s->value) {
+        return;
+    }
+    gtk_range_set_value(GTK_RANGE(s->scale), value);
+}
+
+static void slider_free(gpointer data)
+{
+    g_free(data);
+}
+
+AdwActionRow *as_ui_slider_row(const char *title, double min, double max,
+                               double step, double value, double *out,
+                               void (*changed)(gpointer), gpointer user_data)
+{
+    SliderData *s = g_new0(SliderData, 1);
+    AdwActionRow *row = as_ui_value_row(title);
+    GtkWidget *box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+    GtkWidget *minus = gtk_button_new_from_icon_name("value-decrease-symbolic");
+    GtkWidget *plus = gtk_button_new_from_icon_name("value-increase-symbolic");
+
+    s->min = min;
+    s->max = max;
+    s->step = step;
+    s->value = out;
+    s->changed = changed;
+    s->user_data = user_data;
+    s->row = row;
+    if (value < min) {
+        value = min;
+    }
+    if (value > max) {
+        value = max;
+    }
+    *out = value;
+
+    s->scale = GTK_SCALE(gtk_scale_new_with_range(GTK_ORIENTATION_HORIZONTAL,
+                                                  min, max, step));
+    gtk_widget_set_size_request(GTK_WIDGET(s->scale), 220, -1);
+    gtk_scale_set_draw_value(s->scale, FALSE);
+    gtk_widget_set_valign(GTK_WIDGET(s->scale), GTK_ALIGN_CENTER);
+    g_object_set_data(G_OBJECT(minus), "as-delta", GINT_TO_POINTER(-1));
+    g_object_set_data(G_OBJECT(plus), "as-delta", GINT_TO_POINTER(1));
+    gtk_widget_add_css_class(minus, "flat");
+    gtk_widget_add_css_class(plus, "flat");
+    g_signal_connect(minus, "clicked", G_CALLBACK(slider_step), s);
+    g_signal_connect(plus, "clicked", G_CALLBACK(slider_step), s);
+    g_signal_connect(s->scale, "value-changed", G_CALLBACK(slider_changed), s);
+
+    gtk_box_append(GTK_BOX(box), minus);
+    gtk_box_append(GTK_BOX(box), GTK_WIDGET(s->scale));
+    gtk_box_append(GTK_BOX(box), plus);
+    gtk_widget_set_valign(box, GTK_ALIGN_CENTER);
+    adw_action_row_add_suffix(row, box);
+    slider_show(s);
+    g_object_set_data_full(G_OBJECT(row), "as-slider", s, slider_free);
+    return row;
+}
+
+void as_ui_slider_set(AdwActionRow *row, double value)
+{
+    SliderData *s = g_object_get_data(G_OBJECT(row), "as-slider");
+
+    if (!s) {
+        return;
+    }
+    if (value < s->min) {
+        value = s->min;
+    }
+    if (value > s->max) {
+        value = s->max;
+    }
+    *s->value = value;
+    slider_show(s);
+}
+
 AdwSpinRow *as_ui_spin(const char *title, double min, double max, double step,
                        const char *subtitle)
 {

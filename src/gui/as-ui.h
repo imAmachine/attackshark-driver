@@ -29,6 +29,13 @@ void as_ui_rgb_from_rgba(const GdkRGBA *rgba, uint8_t rgb[3]);
 unsigned as_ui_snap_dpi(unsigned dpi);
 
 AdwActionRow *as_ui_value_row(const char *title);
+/* Row with minus/plus buttons around a slider. The value is kept in out and
+ * changed() is called on every user change. The row itself carries no stored
+ * value, so call as_ui_slider_set() to show a reading from the device. */
+AdwActionRow *as_ui_slider_row(const char *title, double min, double max,
+                               double step, double value, double *out,
+                               void (*changed)(gpointer), gpointer user_data);
+void as_ui_slider_set(AdwActionRow *row, double value);
 void as_ui_row_set_value(AdwActionRow *row, const char *value);
 /* Sets a row subtitle from a printf format. */
 void as_ui_row_format(AdwActionRow *row, const char *fmt, ...)

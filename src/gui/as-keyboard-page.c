@@ -49,20 +49,21 @@ typedef struct {
      * matrix, so the page keeps the matrix positions next to them. */
     AdwPreferencesGroup *key_group;
     AdwSwitchRow *sw_snap;
-    AdwComboRow *row_snap_key1;
-    AdwComboRow *row_snap_key2;
+    GtkWidget *snap_key1_button;
+    GtkWidget *snap_key2_button;
+    AdwActionRow *snap_row1;
+    AdwActionRow *snap_row2;
     AdwComboRow *row_snap_mode;
     AdwSwitchRow *sw_snap_full;
     AdwPreferencesGroup *snap_group;
     guint32 key_signature;
     int key_positions[AS_KB_KEY_MAX];
     int key_count;
-    int partner_positions[AS_KB_KEY_MAX];
-    int partner_count;
-    int snap2_positions[AS_KB_KEY_MAX];
-    int snap2_count;
-    int snap2_for;           /* key1 the second-key list was built for */
-    gboolean row_snap_key1_init;
+    /* Matrix positions chosen for the Snap Tap pair, -1 until a key is
+     * pressed for that slot. */
+    int snap_key1;
+    int snap_key2;
+    gboolean snap_picked;
 } AsKeyboardPage;
 
 /* ---------------------------- write helpers ---------------------------- */
@@ -132,37 +133,14 @@ static void on_travel_control(GtkWidget *widget, GParamSpec *pspec,
 
 /* ------------------------------ snap tap -------------------------------- */
 
-static int key1_index;
-static int key2_index;
-
 static int key1_selected(const AsKeyboardPage *p)
 {
-    guint selected = adw_combo_row_get_selected(p->row_snap_key1);
-
-    if (selected >= (guint)p->partner_count) {
-        return -1;
-    }
-    return p->partner_positions[selected];
+    return p->snap_key1;
 }
 
 static int key2_selected(const AsKeyboardPage *p)
 {
-    guint selected = adw_combo_row_get_selected(p->row_snap_key2);
-
-    if (selected >= (guint)p->snap2_count) {
-        return -1;
-    }
-    return p->snap2_positions[selected];
-}
-
-static int index_of(const int *positions, int count, int pos)
-{
-    for (int i = 0; i < count; i++) {
-        if (positions[i] == pos) {
-            return i;
-        }
-    }
-    return -1;
+    return p->snap_key2;
 }
 
 /* The R85 HE matrix is 15 columns by 6 rows. Walking it row by row makes the
@@ -190,34 +168,6 @@ static guint32 key_signature(const AsDevice *dev)
     return h;
 }
 
-static void key_label(const AsDevice *dev, int pos, char *buf, size_t len)
-{
-    char name[32];
-
-    if (dev->key_code_valid) {
-        as_kb_key_name(dev->key_code[pos], name, sizeof(name));
-        if (name[0]) {
-            snprintf(buf, len, "%s", name);
-            return;
-        }
-    }
-    snprintf(buf, len, "Поз. %d", pos + 1);
-}
-
-static GtkStringList *key_model(const AsDevice *dev, const int *positions,
-                                int count)
-{
-    GtkStringList *list = gtk_string_list_new(NULL);
-
-    for (int i = 0; i < count; i++) {
-        char buf[64];
-
-        key_label(dev, positions[i], buf, sizeof(buf));
-        gtk_string_list_append(list, buf);
-    }
-    return list;
-}
-
 /* Builds the key lists once per matrix. The page holds only the keys, so the
  * layout dialog and the Snap Tap pickers share one definition of order. */
 static void rebuild_key_lists(AsKeyboardPage *p, AsDevice *dev)
@@ -238,11 +188,6 @@ static void rebuild_key_lists(AsKeyboardPage *p, AsDevice *dev)
     qsort(p->key_positions, (size_t)count, sizeof(p->key_positions[0]),
           key_rank_cmp);
     p->key_count = count;
-    p->partner_count = count;
-    memcpy(p->partner_positions, p->key_positions, sizeof(p->key_positions));
-    adw_combo_row_set_model(p->row_snap_key1,
-                            G_LIST_MODEL(key_model(dev, p->key_positions,
-                                                   count)));
 }
 
 static void apply_snap(AsKeyboardPage *p, int disable)
@@ -348,7 +293,8 @@ static void on_side_light_control(GtkWidget *widget, GParamSpec *pspec,
     apply_light(data, 1);
 }
 
-static void rebuild_snap2(AsKeyboardPage *p);
+static void snap_row_text(const AsDevice *dev, int pos, const char *empty,
+                          AdwActionRow *row);
 
 /* ------------------------------ refreshing ----------------------------- */
 
@@ -440,35 +386,26 @@ static void update_page(AsKeyboardPage *p)
         int mode, key1, key2;
 
         rebuild_key_lists(p, dev);
-        /* Snap Tap owns its own pair of keys; the two combos are the source
-         * of truth, and the snapshot only fills them in when the device holds
-         * a pair the page does not show yet. */
-        if (!p->row_snap_key1_init) {
-            int partner = -1;
-
+        /* Snap Tap keeps the keys the user picked; the device is read only
+         * when nothing has been picked yet, so a refresh never moves them. */
+        if (!p->snap_picked) {
             for (int i = 0; i < AS_KB_KEY_MAX; i++) {
                 if (as_kb_snap_mode_of(dev->key_option, dev->key_pair, i) >= 0) {
-                    partner = i;
+                    p->snap_key1 = i;
+                    p->snap_key2 = dev->key_pair[i];
                     break;
                 }
             }
-            if (partner >= 0) {
-                key1_index = index_of(p->partner_positions, p->partner_count,
-                                      partner);
-                key2_index = index_of(p->snap2_positions, p->snap2_count,
-                                      dev->key_pair[partner]);
-            }
-            p->row_snap_key1_init = TRUE;
+            p->snap_picked = TRUE;
         }
-        rebuild_snap2(p);
         key1 = key1_selected(p);
         key2 = key2_selected(p);
         mode = key1 >= 0 && key2 >= 0
                    ? as_kb_snap_mode_of(dev->key_option, dev->key_pair, key1)
                    : -1;
+        snap_row_text(dev, key1, "не выбрана", p->snap_row1);
+        snap_row_text(dev, key2, "не выбрана", p->snap_row2);
         as_ui_switch_set(p->sw_snap, &p->page.updating, mode >= 0);
-        as_ui_combo_set(p->row_snap_key1, &p->page.updating, key1_index);
-        as_ui_combo_set(p->row_snap_key2, &p->page.updating, key2_index);
         as_ui_combo_set(p->row_snap_mode, &p->page.updating,
                         mode >= 0 ? mode : AS_KB_SNAP_LAST);
         as_ui_switch_set(p->sw_snap_full, &p->page.updating,
@@ -512,41 +449,86 @@ static void on_snap_control(GtkWidget *widget, GParamSpec *pspec, gpointer data)
     }
 }
 
-/* Snap Tap picks both keys explicitly; the list of candidates stays in matrix
- * order and skips the key already chosen first. */
-static void rebuild_snap2(AsKeyboardPage *p)
+/* Snap Tap pairs keys that sit next to each other on the board (A and D,
+ * left and right arrow), so the trigger is the key itself instead of a long
+ * list: the next press fills the row the user is waiting for. The keyval is
+ * mapped to a HID usage through the X11 keycode, the same way the kernel
+ * reports it, so the user's layout does not matter. */
+static int key_pos_from_code(const AsDevice *p_dev, const int *positions,
+                             int count, int xcode)
 {
-    AsDevice *dev = as_page_device(&p->page);
-    int key1 = key1_selected(p);
-    int count = 0, keep;
+    for (int i = 0; i < count; i++) {
+        unsigned code = p_dev->key_code[positions[i]];
 
-    if (!dev || key1 == p->snap2_for) {
-        return;
-    }
-    keep = key2_selected(p);
-    p->snap2_for = key1;
-    for (int i = 0; i < p->key_count; i++) {
-        if (p->key_positions[i] != key1) {
-            p->snap2_positions[count++] = p->key_positions[i];
+        if (code < 0x10000 && (int)code + 8 == xcode) {
+            return positions[i];
         }
     }
-    p->snap2_count = count;
-    as_ui_combo_set(p->row_snap_key2, &p->page.updating,
-                    index_of(p->snap2_positions, count, keep));
+    return -1;
 }
 
-static void on_snap_key1(AdwComboRow *row, GParamSpec *pspec, gpointer data)
+static gboolean on_snap_capture(GtkEventControllerKey *controller,
+                                guint keyval, guint keycode,
+                                GdkModifierType state, gpointer data)
 {
     AsKeyboardPage *p = data;
+    AsDevice *dev = as_page_device(&p->page);
+    GtkWidget *widget =
+        gtk_event_controller_get_widget(GTK_EVENT_CONTROLLER(controller));
+    gboolean second = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(widget),
+                                                        "as-second"));
+    int pos;
 
-    (void)pspec;
-    if (p->page.updating) {
+    (void)keyval;
+    (void)state;
+    if (!dev || p->key_count == 0 || keycode == 0) {
+        return FALSE;
+    }
+    pos = key_pos_from_code(dev, p->key_positions, p->key_count, (int)keycode + 8);
+    if (pos < 0) {
+        return FALSE;
+    }
+    if (second) {
+        if (pos == key1_selected(p)) {
+            return TRUE;
+        }
+        p->snap_key2 = pos;
+    } else {
+        p->snap_key1 = pos;
+    }
+    p->snap_picked = TRUE;
+    update_page(p);
+    return TRUE;
+}
+
+/* A plain button that waits for the next key press. */
+static GtkWidget *make_capture_button(const char *label, gboolean second,
+                                      AsKeyboardPage *p)
+{
+    GtkWidget *button = gtk_button_new_with_label(label);
+    GtkEventController *keys = gtk_event_controller_key_new();
+
+    g_object_set_data(G_OBJECT(button), "as-second",
+                      GINT_TO_POINTER(second ? 1 : 0));
+    gtk_event_controller_set_propagation_phase(keys, GTK_PHASE_CAPTURE);
+    g_signal_connect(keys, "key-pressed", G_CALLBACK(on_snap_capture), p);
+    gtk_widget_add_controller(button, keys);
+    return button;
+}
+
+static void snap_row_text(const AsDevice *dev, int pos, const char *empty,
+                          AdwActionRow *row)
+{
+    char name[32];
+    char buf[96];
+
+    if (pos < 0) {
+        as_ui_row_set_value(row, empty);
         return;
     }
-    p->row_snap_key1_init = TRUE;
-    key1_index = (int)adw_combo_row_get_selected(row);
-    rebuild_snap2(p);
-    update_page(p);
+    as_kb_key_name(dev->key_code[pos], name, sizeof(name));
+    snprintf(buf, sizeof(buf), "%s (позиция %d)", name[0] ? name : "?", pos);
+    as_ui_row_set_value(row, buf);
 }
 
 /* ------------------------------ construction --------------------------- */
@@ -626,9 +608,8 @@ static AdwPreferencesGroup *build_key_menu(AsKeyboardPage *p)
         "Срабатывание клавиш",
         "Ход срабатывания, отпускания, Rapid Trigger и Snap Tap задаются "
         "для каждой клавиши отдельно.");
-    AdwActionRow *row = as_ui_value_row(
-        "Настроить клавиши");
-    GtkWidget *button = gtk_button_new_with_label("Настроить клавиши…");
+    AdwActionRow *row = as_ui_value_row("Настройка клавиш");
+    GtkWidget *button = gtk_button_new_with_label("Открыть…");
 
     p->key_group = group;
     gtk_widget_add_css_class(button, "suggested-action");
@@ -645,8 +626,11 @@ static AdwPreferencesGroup *build_snap(AsKeyboardPage *p)
     AdwPreferencesGroup *group = as_ui_group(
         "Snap Tap",
         "Две клавиши работают как одна ось: при удержании обеих отпускание "
-        "одной не прерывает движение второй.");
+        "одной не прерывает движение второй. Нажмите на клавишу и затем "
+        "нажмите нужную клавишу на клавиатуре.");
     GtkStringList *modes = gtk_string_list_new(NULL);
+    AdwActionRow *row1 = as_ui_value_row("Клавиша 1");
+    AdwActionRow *row2 = as_ui_value_row("Клавиша 2");
 
     gtk_string_list_append(modes, "Последнее нажатие");
     gtk_string_list_append(modes, "Нейтрально (обе отпущены)");
@@ -660,27 +644,18 @@ static AdwPreferencesGroup *build_snap(AsKeyboardPage *p)
                      G_CALLBACK(on_snap_toggle), p);
     adw_preferences_group_add(group, GTK_WIDGET(p->sw_snap));
 
-    p->row_snap_key1 = as_ui_combo("Клавиша 1", NULL);
-    {
-        GtkStringList *empty = gtk_string_list_new(NULL);
-
-        adw_combo_row_set_model(p->row_snap_key1, G_LIST_MODEL(empty));
-        g_object_unref(empty);
-    }
-    g_signal_connect(p->row_snap_key1, "notify::selected",
-                     G_CALLBACK(on_snap_key1), p);
-    adw_preferences_group_add(group, GTK_WIDGET(p->row_snap_key1));
-
-    p->row_snap_key2 = as_ui_combo("Клавиша 2", NULL);
-    {
-        GtkStringList *empty = gtk_string_list_new(NULL);
-
-        adw_combo_row_set_model(p->row_snap_key2, G_LIST_MODEL(empty));
-        g_object_unref(empty);
-    }
-    g_signal_connect(p->row_snap_key2, "notify::selected",
-                     G_CALLBACK(on_snap_control), p);
-    adw_preferences_group_add(group, GTK_WIDGET(p->row_snap_key2));
+    p->snap_key1_button = make_capture_button("Нажмите клавишу", FALSE, p);
+    p->snap_key2_button = make_capture_button("Нажмите клавишу", TRUE, p);
+    as_ui_row_set_value(row1, "не выбрана");
+    as_ui_row_set_value(row2, "не выбрана");
+    adw_action_row_add_suffix(row1, p->snap_key1_button);
+    adw_action_row_add_suffix(row2, p->snap_key2_button);
+    adw_action_row_set_activatable_widget(row1, p->snap_key1_button);
+    adw_action_row_set_activatable_widget(row2, p->snap_key2_button);
+    adw_preferences_group_add(group, GTK_WIDGET(row1));
+    adw_preferences_group_add(group, GTK_WIDGET(row2));
+    p->snap_row1 = row1;
+    p->snap_row2 = row2;
 
     p->row_snap_mode = as_ui_combo("Приоритет", G_LIST_MODEL(modes));
     g_signal_connect(p->row_snap_mode, "notify::selected",

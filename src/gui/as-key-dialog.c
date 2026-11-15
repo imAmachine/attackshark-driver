@@ -18,7 +18,7 @@ typedef struct {
     int x, y, w, h;
 } KeyBox;
 
-#define KEY_GAP 6
+#define KEY_GAP 3
 #define KEY_HEIGHT 40
 #define KEY_WIDTH 750
 
@@ -99,16 +99,83 @@ typedef struct {
     char path[64];
     uint8_t selected[AS_KB_KEY_MAX];
     GtkWidget *buttons[G_N_ELEMENTS(keyboxes)];
-    AdwSpinRow *actuation;
-    AdwSpinRow *release;
-    AdwSpinRow *rt_press;
-    AdwSpinRow *rt_release;
-    AdwSpinRow *deadzone;
+    AdwActionRow *actuation;
+    AdwActionRow *release;
+    AdwActionRow *rt_press;
+    AdwActionRow *rt_release;
+    AdwActionRow *deadzone;
+    double act, rel, rtp, rtr, dz;
     AdwSwitchRow *rt;
     GtkWidget *apply;
     GtkWidget *status;
+    AdwComboRow *switch_row;
+    guint32 signature;
     gboolean updating;
 } KeyDialog;
+
+static void load_values(KeyDialog *d);
+
+static guint32 device_signature(const AsDevice *dev)
+{
+    guint32 h = (guint32)dev->key_option[0];
+
+    for (int i = 0; i < AS_KB_KEY_MAX; i++) {
+        h = h * 31u + (guint32)(dev->key_actuation[i] * 1000.0);
+        h = h * 31u + (guint32)(dev->key_rt_press[i] * 1000.0);
+        h = h * 31u + dev->key_option[i];
+        h = h * 31u + dev->key_pair[i];
+    }
+    return h;
+}
+
+static void refresh_from_device(KeyDialog *d)
+{
+    AsDevice *dev = as_store_lookup(d->store, d->path);
+
+    if (!dev) {
+        return;
+    }
+    d->signature = device_signature(dev);
+    load_values(d);
+}
+
+static void on_store_changed(AsStore *store, gpointer data)
+{
+    KeyDialog *d = data;
+    AsDevice *dev = as_store_lookup(store, d->path);
+
+    (void)store;
+    if (dev && device_signature(dev) != d->signature) {
+        refresh_from_device(d);
+    }
+}
+
+static gboolean refresh_later(gpointer data)
+{
+    KeyDialog *d = data;
+
+    refresh_from_device(d);
+    return G_SOURCE_REMOVE;
+}
+
+/* The sliders stop at the two millimetres the firmware accepts for a trigger
+ * point; the bottom-out distance of the switch is listed only for reference,
+ * because it belongs to the switch, not to the profile. */
+#define KEY_MAX_TRIGGER 2.0
+#define KEY_MIN_TRIGGER 0.01
+
+/* Switches the vendor lists for this family, with their bottom-out travel. */
+static const struct {
+    const char *name;
+    const char *bottom_out;
+} switch_presets[] = {
+    { "Gateron Magnetic Jade", "3.4 мм" },
+    { "Gateron Magnetic Jade Pro", "3.4 мм" },
+    { "Gateron Magnetic Jade Gaming", "3.4 мм" },
+    { "Geon Raw HE", "3.4 мм" },
+    { "TTC King", "3.5 мм" },
+    { "Outemu Silent Ocean", "3.4 мм" },
+};
 
 static const char *short_key_name(unsigned code, char *buf, size_t len)
 {
@@ -166,11 +233,11 @@ static void load_values(KeyDialog *d)
     }
     previous = d->updating;
     d->updating = TRUE;
-    as_ui_spin_set(d->actuation, &d->updating, dev->key_actuation[key]);
-    as_ui_spin_set(d->release, &d->updating, dev->key_release[key]);
-    as_ui_spin_set(d->rt_press, &d->updating, dev->key_rt_press[key]);
-    as_ui_spin_set(d->rt_release, &d->updating, dev->key_rt_release[key]);
-    as_ui_spin_set(d->deadzone, &d->updating, dev->key_deadzone[key]);
+    as_ui_slider_set(d->actuation, dev->key_actuation[key]);
+    as_ui_slider_set(d->release, dev->key_release[key]);
+    as_ui_slider_set(d->rt_press, dev->key_rt_press[key]);
+    as_ui_slider_set(d->rt_release, dev->key_rt_release[key]);
+    as_ui_slider_set(d->deadzone, dev->key_deadzone[key]);
     as_ui_switch_set(d->rt, &d->updating,
                      dev->key_option[key] & AS_KB_OPTION_RT);
     d->updating = previous;
@@ -270,15 +337,29 @@ static void on_apply(GtkButton *button, gpointer data)
     AsOpRequest req = {
         .op = AS_OP_KB_KEYS_TRAVEL,
         .rapid_trigger = adw_switch_row_get_active(d->rt),
-        .actuation = adw_spin_row_get_value(d->actuation),
-        .release = adw_spin_row_get_value(d->release),
-        .rt_press = adw_spin_row_get_value(d->rt_press),
-        .rt_release = adw_spin_row_get_value(d->rt_release),
-        .deadzone = adw_spin_row_get_value(d->deadzone),
+        .actuation = d->act,
+        .release = d->rel,
+        .rt_press = d->rtp,
+        .rt_release = d->rtr,
+        .deadzone = d->dz,
     };
     char buf[64];
 
     (void)button;
+    /* The firmware accepts a trigger point up to 2 mm; anything longer is
+     * the bottom-out of the switch, not a trigger. */
+    if (req.actuation > KEY_MAX_TRIGGER) {
+        req.actuation = KEY_MAX_TRIGGER;
+    }
+    if (req.release > KEY_MAX_TRIGGER) {
+        req.release = KEY_MAX_TRIGGER;
+    }
+    if (req.rt_press > KEY_MAX_TRIGGER) {
+        req.rt_press = KEY_MAX_TRIGGER;
+    }
+    if (req.rt_release > KEY_MAX_TRIGGER) {
+        req.rt_release = KEY_MAX_TRIGGER;
+    }
     memcpy(req.keys, d->selected, sizeof(req.keys));
     if (!as_store_apply(d->store, d->path, &req)) {
         return;
@@ -288,19 +369,43 @@ static void on_apply(GtkButton *button, gpointer data)
     gtk_label_set_text(GTK_LABEL(d->status), buf);
 }
 
+/* Every switch gets the same starting point the vendor uses in its "gaming"
+ * mode: 1.5 mm trigger, 0.2 mm Rapid Trigger offsets. The type only decides
+ * which switch names are offered, since the firmware stores one profile for
+ * all keys. */
+static void on_switch_type(AdwComboRow *row, GParamSpec *pspec, gpointer data)
+{
+    KeyDialog *d = data;
+    guint selected = adw_combo_row_get_selected(row);
+    gboolean previous;
+
+    (void)pspec;
+    if (d->updating || selected >= G_N_ELEMENTS(switch_presets)) {
+        return;
+    }
+    previous = d->updating;
+    d->updating = TRUE;
+    as_ui_slider_set(d->actuation, 1.5);
+    as_ui_slider_set(d->release, 1.5);
+    as_ui_slider_set(d->rt_press, 0.2);
+    as_ui_slider_set(d->rt_release, 0.2);
+    as_ui_switch_set(d->rt, &d->updating, TRUE);
+    d->updating = previous;
+}
+
 static void on_close(GtkButton *button, gpointer data)
 {
     (void)button;
     gtk_window_destroy(GTK_WINDOW(data));
 }
 
-static AdwSpinRow *make_spin(AdwPreferencesGroup *group, const char *title,
-                             double min, double max, double value)
+static AdwActionRow *make_slider(AdwPreferencesGroup *group, const char *title,
+                                 double min, double max, double *out,
+                                 double value, KeyDialog *d)
 {
-    AdwSpinRow *row = as_ui_spin(title, min, max, 0.1, "мм");
+    AdwActionRow *row = as_ui_slider_row(title, min, max, 0.05, value, out,
+                                         NULL, d);
 
-    adw_spin_row_set_digits(row, 2);
-    adw_spin_row_set_value(row, value);
     adw_preferences_group_add(group, GTK_WIDGET(row));
     return row;
 }
@@ -401,17 +506,36 @@ void as_key_dialog_open(GtkWindow *parent, AsStore *store, const char *path)
     gtk_box_append(GTK_BOX(select),
                    make_button("Цифры", G_CALLBACK(on_select_digits), d));
     gtk_box_append(GTK_BOX(select),
-                   make_button("Модификаторы",
+                   make_button("Спец. клавиши",
                                G_CALLBACK(on_select_modifiers), d));
     gtk_box_append(GTK_BOX(select),
                    make_button("Снять", G_CALLBACK(on_select_none), d));
     gtk_box_append(GTK_BOX(outer), select);
 
-    d->actuation = make_spin(group, "Точка срабатывания", 0.1, 4.0, 1.5);
-    d->release = make_spin(group, "Точка отпускания", 0.1, 4.0, 1.5);
-    d->rt_press = make_spin(group, "Rapid Trigger: нажатие", 0.1, 4.0, 0.2);
-    d->rt_release = make_spin(group, "Rapid Trigger: отпускание", 0.1, 4.0, 0.2);
-    d->deadzone = make_spin(group, "Мёртвая зона", 0.0, 1.0, 0.3);
+    {
+        GtkStringList *types = gtk_string_list_new(NULL);
+
+        for (size_t i = 0; i < G_N_ELEMENTS(switch_presets); i++) {
+            char label[96];
+
+            snprintf(label, sizeof(label), "%s, ход %s",
+                     switch_presets[i].name, switch_presets[i].bottom_out);
+            gtk_string_list_append(types, label);
+        }
+        d->switch_row = as_ui_combo("Тип свитчей", G_LIST_MODEL(types));
+        g_signal_connect(d->switch_row, "notify::selected",
+                         G_CALLBACK(on_switch_type), d);
+        adw_preferences_group_add(group, GTK_WIDGET(d->switch_row));
+    }
+    d->actuation = make_slider(group, "Точка срабатывания", 0.1, 2.0,
+                               &d->act, 1.5, d);
+    d->release = make_slider(group, "Точка отпускания", 0.1, 2.0, &d->rel, 1.5,
+                             d);
+    d->rt_press = make_slider(group, "Rapid Trigger: нажатие", 0.1, 2.0,
+                              &d->rtp, 0.2, d);
+    d->rt_release = make_slider(group, "Rapid Trigger: отпускание", 0.1, 2.0,
+                                &d->rtr, 0.2, d);
+    d->deadzone = make_slider(group, "Мёртвая зона", 0.0, 1.0, &d->dz, 0.3, d);
     d->rt = as_ui_switch_row("Rapid Trigger", NULL);
     adw_preferences_group_add(group, GTK_WIDGET(d->rt));
     gtk_box_append(GTK_BOX(outer), GTK_WIDGET(group));
@@ -431,5 +555,10 @@ void as_key_dialog_open(GtkWindow *parent, AsStore *store, const char *path)
     gtk_box_append(GTK_BOX(outer), actions);
 
     gtk_window_set_child(d->window, outer);
+    /* The page may still be waiting for the first scan; read the values now
+     * and again once the store has them, and follow later writes the same
+     * way so the sliders never show stale numbers. */
+    g_signal_connect(store, "changed", G_CALLBACK(on_store_changed), d);
     gtk_window_present(d->window);
+    g_timeout_add(500, refresh_later, d);
 }
