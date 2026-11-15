@@ -95,12 +95,11 @@ static int exchange(struct as_mouse *m, const uint8_t *pkt, uint8_t *reply,
             if (ret < 0) {
                 return ret;
             }
-            if (ret < 2 || buf[0] != REPORT_ID) {
+            if (ret < PACKET_LEN + 1 || buf[0] != REPORT_ID) {
                 continue;
             }
             /* The echo starts at buf[1]; a reply must repeat it. */
-            if (ret >= echo_len + 1 &&
-                memcmp(buf + 1, pkt, (size_t)echo_len) == 0) {
+            if (memcmp(buf + 1, pkt, (size_t)echo_len) == 0) {
                 if (reply) {
                     size_t n = (size_t)ret - 1;
 
