@@ -48,7 +48,13 @@ $(LIB): $(LIB_OBJ)
 $(BIN): src/main.o $(LIB)
 	$(CC) $(LDFLAGS) -o $@ src/main.o $(LIB) $(LDLIBS) -lm
 
+ifeq ($(HAVE_GTK),yes)
 gui: $(GUI)
+else
+gui:
+	@echo "GTK4 and libadwaita are required to build the GUI" >&2
+	@false
+endif
 
 $(GUI): $(GUI_OBJ) $(LIB)
 	$(CC) $(LDFLAGS) -o $@ $(GUI_OBJ) $(LIB) $(GUI_LIBS) $(LDLIBS) -lm
