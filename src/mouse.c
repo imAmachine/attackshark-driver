@@ -143,7 +143,11 @@ int as_mouse_open(struct as_mouse *m)
     if (ret < 0) {
         return ret;
     }
-    return as_mouse_handshake(m);
+    ret = as_mouse_handshake(m);
+    if (ret < 0) {
+        as_mouse_close(m);
+    }
+    return ret;
 }
 
 void as_mouse_close(struct as_mouse *m)

@@ -202,7 +202,7 @@ static int write_rules(const char *text, char *err, size_t errlen)
         return -errno;
     }
     rc = write_all(fd, text, strlen(text));
-    if (rc == 0 && close(fd) != 0) {
+    if (close(fd) != 0 && rc == 0) {
         rc = -errno;
     }
     if (rc == 0 && rename(tmp, RULE_PATH) != 0) {
