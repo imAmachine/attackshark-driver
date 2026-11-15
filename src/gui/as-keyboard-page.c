@@ -115,7 +115,7 @@ static void apply_zone_power(AdwSwitchRow *row, GParamSpec *pspec,
     AsKeyboardPage *p = data;
     AsDevice *dev;
     int side = row == p->sw_side_light;
-    AsOpRequest req = { .op = side ? AS_OP_KB_SIDE_LIGHT : AS_OP_KB_LIGHT };
+    AsOpRequest req = { .op = side ? AS_OP_KB_SIDE_LIGHT : AS_OP_KB_LIGHT_POWER };
 
     (void)pspec;
     if (p->page.updating) {
@@ -136,12 +136,7 @@ static void apply_zone_power(AdwSwitchRow *row, GParamSpec *pspec,
                                     : 4)
                              : 0;
     } else {
-        req.light_brightness = dev->light_brightness;
-        req.light_speed = dev->light_speed;
-        req.light_dazzle = dev->light_dazzle;
-        memcpy(req.rgb, dev->light_rgb, sizeof(req.rgb));
-        req.light_mode = adw_switch_row_get_active(row) ?
-                         (dev->light_mode > 0 ? dev->light_mode : 1) : 0;
+        req.light_on = adw_switch_row_get_active(row);
     }
     as_store_apply(p->page.store, p->page.path, &req);
 }

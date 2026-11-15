@@ -100,6 +100,7 @@ enum {
     AS_OP_KB_MAG_MODE,
     AS_OP_KB_TRAVEL,
     AS_OP_KB_LIGHT,
+    AS_OP_KB_LIGHT_POWER,
     AS_OP_KB_SIDE_LIGHT,
 };
 

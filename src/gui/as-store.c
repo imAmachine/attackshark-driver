@@ -480,21 +480,11 @@ static int apply_keyboard(struct as_keyboard *kb, const AsOpRequest *req)
                                       req->rt_release, req->deadzone);
     case AS_OP_KB_SIDE_LIGHT:
         request_light(req, &light);
-        if (as_keyboard_set_sidelight(kb, &light) < 0) {
-            return -EIO;
-        }
-        return as_keyboard_set_light_power_zones(kb, 1, req->light_mode != 0);
+        return as_keyboard_set_sidelight(kb, &light);
+    case AS_OP_KB_LIGHT_POWER:
+        return as_keyboard_set_light_power_zones(kb, req->light_on, 1);
     case AS_OP_KB_LIGHT:
         request_light(req, &light);
-        if (req->light_mode == 0) {
-            if (as_keyboard_set_light(kb, &light) < 0) {
-                return -EIO;
-            }
-            return as_keyboard_set_light_power_zones(kb, 0, 1);
-        }
-        if (as_keyboard_set_light_power_zones(kb, 1, 1) < 0) {
-            return -EIO;
-        }
         return as_keyboard_set_light(kb, &light);
     default:
         return -EINVAL;
@@ -558,9 +548,12 @@ static void apply_optimistic(AsDevice *dev, const AsOpRequest *req)
     case AS_OP_MOUSE_RIPPLE:
         dev->ripple = req->value;
         break;
+    case AS_OP_KB_LIGHT_POWER:
+        dev->light_on = req->light_on;
+        break;
     case AS_OP_KB_LIGHT:
         dev->light_valid = 1;
-        dev->light_on = req->light_mode != 0;
+        dev->light_mode = req->light_mode;
         dev->light_mode = req->light_mode;
         dev->light_speed = req->light_speed;
         dev->light_brightness = req->light_brightness;
