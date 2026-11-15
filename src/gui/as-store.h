@@ -61,6 +61,12 @@ typedef struct {
     int revision_valid;
     int revision;
     int mag_mode;
+    int rapid_trigger;
+    double actuation;
+    double release;
+    double rt_press;
+    double rt_release;
+    double deadzone;
     int light_valid;
     int light_on;
     int light_mode;
@@ -92,6 +98,7 @@ enum {
     AS_OP_KB_PROFILE,
     AS_OP_KB_DEBOUNCE,
     AS_OP_KB_MAG_MODE,
+    AS_OP_KB_TRAVEL,
     AS_OP_KB_LIGHT,
     AS_OP_KB_SIDE_LIGHT,
 };
@@ -107,6 +114,12 @@ typedef struct {
     int light_on;
     int light_option;
     int light_dazzle;
+    double actuation;
+    double release;
+    double rt_press;
+    double rt_release;
+    double deadzone;
+    int rapid_trigger;
 } AsOpRequest;
 
 AsStore *as_store_get(void);

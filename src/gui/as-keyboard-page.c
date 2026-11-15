@@ -12,18 +12,18 @@
  */
 typedef struct {
     AsPage page;
-
-    /* status */
     AdwActionRow *row_firmware;
     AdwActionRow *row_revision;
     AdwActionRow *row_profile;
-
-    /* settings */
     AdwComboRow *row_rate_combo;
     AdwSpinRow *row_debounce_spin;
     AdwComboRow *row_mag_combo;
-
-    /* lighting */
+    AdwSpinRow *row_actuation;
+    AdwSpinRow *row_release;
+    AdwSpinRow *row_rt_press;
+    AdwSpinRow *row_rt_release;
+    AdwSpinRow *row_deadzone;
+    AdwSwitchRow *sw_rapid_trigger;
     AdwSwitchRow *sw_light;
     AdwComboRow *row_light_mode;
     AdwSpinRow *row_bright;
@@ -82,6 +82,31 @@ static void apply_mag_mode(AdwComboRow *row, GParamSpec *pspec, gpointer data)
     if (!p->page.updating && selected < (guint)as_ui_mag_mode_count()) {
         as_store_apply(p->page.store, p->page.path, &req);
     }
+}
+
+static void apply_travel(AsKeyboardPage *p)
+{
+    AsOpRequest req = {
+        .op = AS_OP_KB_TRAVEL,
+        .rapid_trigger = adw_switch_row_get_active(p->sw_rapid_trigger),
+        .actuation = adw_spin_row_get_value(p->row_actuation),
+        .release = adw_spin_row_get_value(p->row_release),
+        .rt_press = adw_spin_row_get_value(p->row_rt_press),
+        .rt_release = adw_spin_row_get_value(p->row_rt_release),
+        .deadzone = adw_spin_row_get_value(p->row_deadzone),
+    };
+
+    if (!p->page.updating) {
+        as_page_queue(&p->page, &req);
+    }
+}
+
+static void on_travel_control(GtkWidget *widget, GParamSpec *pspec,
+                              gpointer data)
+{
+    (void)widget;
+    (void)pspec;
+    apply_travel(data);
 }
 
 static void apply_zone_power(AdwSwitchRow *row, GParamSpec *pspec,
@@ -178,9 +203,7 @@ static void update_page(AsKeyboardPage *p)
         return;
     }
     p->page.updating = TRUE;
-
     as_page_banner(&p->page, dev->error[0] ? as_ui_error(dev) : NULL);
-
     if (dev->usb_version_valid) {
         as_ui_row_format(p->row_firmware, "%u (0x%04x)", dev->usb_version,
                          dev->usb_version);
@@ -201,9 +224,17 @@ static void update_page(AsKeyboardPage *p)
     if (dev->mag_mode >= 0) {
         as_ui_combo_set(p->row_mag_combo, &p->page.updating, dev->mag_mode);
     }
+    if (dev->actuation > 0.0) {
+        as_ui_spin_set(p->row_actuation, &p->page.updating, dev->actuation);
+        as_ui_spin_set(p->row_release, &p->page.updating, dev->release);
+        as_ui_spin_set(p->row_rt_press, &p->page.updating, dev->rt_press);
+        as_ui_spin_set(p->row_rt_release, &p->page.updating, dev->rt_release);
+        as_ui_spin_set(p->row_deadzone, &p->page.updating, dev->deadzone);
+        as_ui_switch_set(p->sw_rapid_trigger, &p->page.updating,
+                         dev->rapid_trigger);
+    }
     as_ui_combo_set(p->row_rate_combo, &p->page.updating,
                     as_ui_rate_to_index(dev->rate));
-
     gtk_widget_set_visible(GTK_WIDGET(p->light_group), dev->light_valid);
     if (dev->light_valid) {
         light_on = dev->light_mode != 0;
@@ -240,7 +271,6 @@ static void update_page(AsKeyboardPage *p)
         gtk_widget_set_sensitive(GTK_WIDGET(p->sw_side_dazzle), side_on);
         gtk_widget_set_sensitive(GTK_WIDGET(p->side_color), side_on);
     }
-
     p->page.updating = FALSE;
 }
 
@@ -291,6 +321,33 @@ static AdwPreferencesGroup *build_settings(AsKeyboardPage *p)
     g_signal_connect(p->row_mag_combo, "notify::selected",
                      G_CALLBACK(apply_mag_mode), p);
     adw_preferences_group_add(group, GTK_WIDGET(p->row_mag_combo));
+    return group;
+}
+
+static AdwPreferencesGroup *build_travel(AsKeyboardPage *p)
+{
+    AdwPreferencesGroup *group = as_ui_group(
+        "Срабатывание клавиш", "Настройки применяются ко всем клавишам.");
+    AdwSpinRow **rows[] = { &p->row_actuation, &p->row_release,
+                            &p->row_rt_press, &p->row_rt_release,
+                            &p->row_deadzone };
+    const char *titles[] = { "Точка срабатывания", "Точка отпускания",
+                            "Rapid Trigger: нажатие", "Rapid Trigger: отпускание",
+                            "Мёртвая зона" };
+
+    for (size_t i = 0; i < G_N_ELEMENTS(rows); i++) {
+        *rows[i] = as_ui_spin(titles[i], i == 4 ? 0.0 : 0.1,
+                              i == 4 ? 1.0 : 4.0, 0.1, "мм");
+        adw_spin_row_set_digits(*rows[i], 2);
+        adw_spin_row_set_value(*rows[i], i == 4 ? 0.0 : i < 2 ? 1.5 : 0.2);
+        g_signal_connect(*rows[i], "notify::value",
+                         G_CALLBACK(on_travel_control), p);
+        adw_preferences_group_add(group, GTK_WIDGET(*rows[i]));
+    }
+    p->sw_rapid_trigger = as_ui_switch_row("Rapid Trigger", NULL);
+    g_signal_connect(p->sw_rapid_trigger, "notify::active",
+                     G_CALLBACK(on_travel_control), p);
+    adw_preferences_group_add(group, GTK_WIDGET(p->sw_rapid_trigger));
     return group;
 }
 
@@ -356,6 +413,7 @@ GtkWidget *as_keyboard_page_new(AsStore *store, const char *path)
     as_page_attach(&p->page, box, prefs, store, path);
     adw_preferences_page_add(prefs, build_status(p));
     adw_preferences_page_add(prefs, build_settings(p));
+    adw_preferences_page_add(prefs, build_travel(p));
     adw_preferences_page_add(prefs, build_light(p));
 
     p->side_light_group = as_ui_group(

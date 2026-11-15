@@ -221,6 +221,23 @@ static void fill_keyboard(Handle *h, AsDevice *dev)
     dev->rate = st.report_rate;
     dev->debounce = st.debounce;
     dev->mag_mode = st.mag_mode;
+    if (st.mag_mode >= 0) {
+        int32_t act[128], rel[128], rtp[128], rtr[128], dz[128], opt[128];
+
+        if (as_keyboard_get_param(&h->kb, AS_K_MAG_ACTUATION, act, 128) == 0 &&
+            as_keyboard_get_param(&h->kb, AS_K_MAG_RELEASE, rel, 128) == 0 &&
+            as_keyboard_get_param(&h->kb, AS_K_MAG_RT_PRESS, rtp, 128) == 0 &&
+            as_keyboard_get_param(&h->kb, AS_K_MAG_RT_RELEASE, rtr, 128) == 0 &&
+            as_keyboard_get_param(&h->kb, AS_K_MAG_DEADZONE, dz, 128) == 0 &&
+            as_keyboard_get_param(&h->kb, AS_K_MAG_OPTION, opt, 128) == 0) {
+            dev->actuation = as_kb_value_to_mm(&h->kb, AS_K_MAG_ACTUATION, act[0]);
+            dev->release = as_kb_value_to_mm(&h->kb, AS_K_MAG_RELEASE, rel[0]);
+            dev->rt_press = as_kb_value_to_mm(&h->kb, AS_K_MAG_RT_PRESS, rtp[0]);
+            dev->rt_release = as_kb_value_to_mm(&h->kb, AS_K_MAG_RT_RELEASE, rtr[0]);
+            dev->deadzone = as_kb_value_to_mm(&h->kb, AS_K_MAG_DEADZONE, dz[0]);
+            dev->rapid_trigger = (opt[0] & 0x80) != 0;
+        }
+    }
     if (st.light.valid) {
         dev->light_valid = 1;
         dev->light_on = st.light_on;
@@ -457,6 +474,10 @@ static int apply_keyboard(struct as_keyboard *kb, const AsOpRequest *req)
         return as_keyboard_set_debounce(kb, req->value);
     case AS_OP_KB_MAG_MODE:
         return as_keyboard_set_mag_mode(kb, req->value);
+    case AS_OP_KB_TRAVEL:
+        return as_keyboard_set_travel(kb, req->rapid_trigger, req->actuation,
+                                      req->release, req->rt_press,
+                                      req->rt_release, req->deadzone);
     case AS_OP_KB_SIDE_LIGHT:
     case AS_OP_KB_LIGHT:
         request_light(req, &light);
@@ -553,6 +574,14 @@ static void apply_optimistic(AsDevice *dev, const AsOpRequest *req)
         break;
     case AS_OP_KB_MAG_MODE:
         dev->mag_mode = req->value;
+        break;
+    case AS_OP_KB_TRAVEL:
+        dev->rapid_trigger = req->rapid_trigger;
+        dev->actuation = req->actuation;
+        dev->release = req->release;
+        dev->rt_press = req->rt_press;
+        dev->rt_release = req->rt_release;
+        dev->deadzone = req->deadzone;
         break;
     default:
         break;
