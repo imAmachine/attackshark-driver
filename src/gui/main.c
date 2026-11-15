@@ -38,11 +38,16 @@ static gboolean save_screenshot(gpointer data)
     gsk_render_node_draw(node, cr);
     cairo_destroy(cr);
     cairo_surface_flush(surface);
-    cairo_surface_write_to_png(surface, path);
+    cairo_status_t status = cairo_surface_write_to_png(surface, path);
     cairo_surface_destroy(surface);
     gsk_render_node_unref(node);
     g_object_unref(paintable);
 
+    if (status != CAIRO_STATUS_SUCCESS) {
+        g_printerr("screenshot: %s\n", cairo_status_to_string(status));
+        g_application_quit(g_application_get_default());
+        return G_SOURCE_REMOVE;
+    }
     g_print("screenshot: %s (%dx%d)\n", path, width, height);
     g_application_quit(g_application_get_default());
     return G_SOURCE_REMOVE;
