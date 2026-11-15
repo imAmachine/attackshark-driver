@@ -157,6 +157,14 @@ gboolean as_store_permissions_denied(AsStore *self);
  * window runs its own helper through pkexec. */
 void as_store_fix_permissions(AsStore *self);
 
+/* Analog travel stream of one keyboard, used by the switch demo. It is polled
+ * on the worker thread and the "analog" signal fires when values arrived. */
+gboolean as_store_analog_start(AsStore *self, const char *path);
+void as_store_analog_stop(AsStore *self);
+/* Travel of one matrix position in thousandths of a millimetre, 0 when the
+ * stream is off or that key is released. */
+int as_store_travel(AsStore *self, const char *path, int key);
+
 /* Queues a write. Returns FALSE when the device is unknown. */
 gboolean as_store_apply(AsStore *self, const char *path, const AsOpRequest *req);
 /* Closes every handle; call after as_worker_stop(). */

@@ -114,10 +114,9 @@ typedef struct {
     GtkWidget *group_buttons[4];
     GtkWidget *demo_area;
     AdwSwitchRow *demo_switch;
-    guint demo_timer;
-    double demo_depth;      /* how far the demo switch is pressed, mm */
+    int demo_key;           /* matrix position the demo follows */
     double switch_bottom;   /* travel of the selected switch type, mm */
-    gboolean demo_held;
+    gboolean demo_active;
     guint32 signature;
     gboolean updating;
 } KeyDialog;
@@ -481,7 +480,38 @@ static void on_close(GtkButton *button, gpointer data)
     gtk_window_destroy(GTK_WINDOW(data));
 }
 
-static void on_slider_changed(gpointer data);
+static void on_slider_changed(gpointer data)
+{
+    KeyDialog *d = data;
+
+    gtk_widget_queue_draw(d->demo_area);
+}
+
+static void on_demo_toggle(AdwSwitchRow *row, GParamSpec *pspec, gpointer data)
+{
+    KeyDialog *d = data;
+    gboolean active = adw_switch_row_get_active(row);
+    gboolean previous = d->updating;
+
+    (void)pspec;
+    if (d->updating) {
+        return;
+    }
+    if (active && !as_store_analog_start(d->store, d->path)) {
+        d->updating = TRUE;
+        adw_switch_row_set_active(row, FALSE);
+        d->updating = previous;
+        gtk_label_set_text(GTK_LABEL(d->status),
+                           "Поток хода недоступен для этой клавиатуры");
+        return;
+    }
+    if (!active) {
+        as_store_analog_stop(d->store);
+    }
+    d->demo_active = active;
+    gtk_widget_set_visible(d->demo_area, active);
+    gtk_widget_queue_draw(d->demo_area);
+}
 
 static AdwActionRow *make_slider(AdwPreferencesGroup *group, const char *title,
                                  double min, double max, double *out,
@@ -503,8 +533,23 @@ static GtkWidget *make_button(const char *label, GCallback callback,
     return button;
 }
 
-/* Press test: the dialog follows the physical keyboard and lights the key
- * that is held, so the row that is being configured can be found by touch. */
+/* ---------------------------- switch demo ------------------------------ */
+
+static double demo_travel(const KeyDialog *d)
+{
+    return d->switch_bottom > 0.1 ? d->switch_bottom : 3.4;
+}
+
+/* The depth comes straight from the analog report of the keyboard, so the cap
+ * sits exactly where the physical switch is. */
+static double demo_depth(const KeyDialog *d)
+{
+    if (!d->demo_active || d->demo_key < 0) {
+        return 0.0;
+    }
+    return as_store_travel(d->store, d->path, d->demo_key) / 1000.0;
+}
+
 static GtkWidget *button_for_code(KeyDialog *d, unsigned code)
 {
     if (!code) {
@@ -523,8 +568,8 @@ static gboolean on_test_pressed(GtkEventControllerKey *controller,
                                 GdkModifierType state, gpointer data)
 {
     KeyDialog *d = data;
-    GtkWidget *button =
-        button_for_code(d, as_ui_hid_from_keyval(keyval));
+    unsigned code = as_ui_hid_from_keyval(keyval);
+    GtkWidget *button = button_for_code(d, code);
 
     (void)controller;
     (void)keycode;
@@ -532,7 +577,13 @@ static gboolean on_test_pressed(GtkEventControllerKey *controller,
     if (button) {
         gtk_widget_add_css_class(button, "pressed");
     }
-    d->demo_held = TRUE;
+    for (size_t i = 0; i < G_N_ELEMENTS(keyboxes); i++) {
+        if (keyboxes[i].code == code) {
+            d->demo_key = keyboxes[i].pos;
+            break;
+        }
+    }
+    gtk_widget_queue_draw(d->demo_area);
     return FALSE;
 }
 
@@ -541,8 +592,7 @@ static void on_test_released(GtkEventControllerKey *controller, guint keyval,
                              gpointer data)
 {
     KeyDialog *d = data;
-    GtkWidget *button =
-        button_for_code(d, as_ui_hid_from_keyval(keyval));
+    GtkWidget *button = button_for_code(d, as_ui_hid_from_keyval(keyval));
 
     (void)controller;
     (void)keycode;
@@ -550,33 +600,7 @@ static void on_test_released(GtkEventControllerKey *controller, guint keyval,
     if (button) {
         gtk_widget_remove_css_class(button, "pressed");
     }
-    d->demo_held = FALSE;
-}
-
-/* ---------------------------- switch demo ------------------------------ */
-
-/* The demo follows the held key and moves the cap through the same zones the
- * saved settings describe, which is how the vendor's own travel view works.
- * The depth is animated because the config channel does not stream travel. */
-static double demo_travel(const KeyDialog *d)
-{
-    return d->switch_bottom > 0.1 ? d->switch_bottom : 3.4;
-}
-
-static gboolean demo_tick(gpointer data)
-{
-    KeyDialog *d = data;
-    double travel = demo_travel(d);
-    double target = d->demo_held ? travel : 0.0;
-    double step = travel / 0.15 * 0.016;   /* full stroke in ~150 ms */
-
-    if (d->demo_depth < target) {
-        d->demo_depth = MIN(target, d->demo_depth + step);
-    } else if (d->demo_depth > target) {
-        d->demo_depth = MAX(target, d->demo_depth - step);
-    }
     gtk_widget_queue_draw(d->demo_area);
-    return G_SOURCE_CONTINUE;
 }
 
 static void demo_draw(GtkDrawingArea *area, cairo_t *cr, int width, int height,
@@ -584,29 +608,31 @@ static void demo_draw(GtkDrawingArea *area, cairo_t *cr, int width, int height,
 {
     KeyDialog *d = data;
     double travel = demo_travel(d);
+    double depth = MIN(demo_depth(d), travel);
     double top = 22.0, bottom = height - 22.0, span = bottom - top;
     double act = MIN(d->act, travel), rel = MIN(d->rel, travel);
     double y_act = top + act / travel * span;
     double y_rel = top + rel / travel * span;
-    double y_now = top + MIN(d->demo_depth, travel) / travel * span;
+    double y_now = top + depth / travel * span;
     double housing_x = 46.0, housing_w = 74.0;
     char buf[96];
 
     (void)area;
     (void)width;
-    /* Travel scale and the zones the settings create. */
     cairo_set_source_rgb(cr, 0.20, 0.20, 0.22);
     cairo_rectangle(cr, housing_x, top - 8, housing_w, span + 16);
+    cairo_fill(cr);
+    cairo_set_source_rgba(cr, 0.20, 0.60, 1.0, 0.30);
+    cairo_rectangle(cr, housing_x, top, housing_w, y_act - top);
     cairo_fill(cr);
     cairo_set_source_rgba(cr, 0.16, 0.65, 0.40, 0.35);
     cairo_rectangle(cr, housing_x, y_act, housing_w, bottom - y_act);
     cairo_fill(cr);
-    cairo_set_source_rgba(cr, 0.95, 0.65, 0.10, 0.35);
+    cairo_set_source_rgba(cr, 0.95, 0.65, 0.10, 0.40);
     cairo_rectangle(cr, housing_x, y_rel, housing_w,
                     MAX(1.0, y_act - y_rel));
     cairo_fill(cr);
 
-    /* Actuation and release lines. */
     cairo_set_line_width(cr, 2.0);
     cairo_set_source_rgb(cr, 0.20, 0.60, 1.0);
     cairo_move_to(cr, housing_x - 10, y_act);
@@ -617,7 +643,6 @@ static void demo_draw(GtkDrawingArea *area, cairo_t *cr, int width, int height,
     cairo_line_to(cr, housing_x + housing_w + 10, y_rel);
     cairo_stroke(cr);
 
-    /* The cap itself, at the depth reached so far. */
     cairo_set_source_rgb(cr, 0.35, 0.38, 0.45);
     cairo_rectangle(cr, housing_x + 4, y_now - 11, housing_w - 8, 22);
     cairo_fill(cr);
@@ -625,12 +650,11 @@ static void demo_draw(GtkDrawingArea *area, cairo_t *cr, int width, int height,
     cairo_rectangle(cr, housing_x + 14, y_now - 5, housing_w - 28, 3);
     cairo_fill(cr);
 
-    /* Readings: depth, the two trigger points and the current zone. */
     cairo_set_source_rgb(cr, 0.95, 0.95, 0.95);
     cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL,
                            CAIRO_FONT_WEIGHT_BOLD);
     cairo_set_font_size(cr, 14.0);
-    snprintf(buf, sizeof(buf), "%.2f мм из %.2f", d->demo_depth, travel);
+    snprintf(buf, sizeof(buf), "%.2f мм из %.2f", depth, travel);
     cairo_move_to(cr, housing_x + housing_w + 24, top + 4);
     cairo_show_text(cr, buf);
 
@@ -647,43 +671,34 @@ static void demo_draw(GtkDrawingArea *area, cairo_t *cr, int width, int height,
     cairo_move_to(cr, housing_x + housing_w + 24, top + 50);
     cairo_show_text(cr, buf);
 
-    if (d->demo_depth >= act) {
+    if (depth >= act) {
         snprintf(buf, sizeof(buf), "зона: сработала");
-    } else if (d->demo_depth <= rel && d->demo_held == FALSE &&
-               d->demo_depth < act) {
+    } else if (depth <= rel) {
         snprintf(buf, sizeof(buf), "зона: отпущена");
     } else {
-        snprintf(buf, sizeof(buf), "зона: ожидание");
+        snprintf(buf, sizeof(buf), "зона: до срабатывания");
     }
     cairo_set_source_rgb(cr, 0.95, 0.95, 0.95);
     cairo_move_to(cr, housing_x + housing_w + 24, top + 70);
     cairo_show_text(cr, buf);
 }
 
-static void on_slider_changed(gpointer data)
+static void on_analog(AsStore *store, gpointer data)
 {
-    KeyDialog *d = data;
+    GtkWidget *area = data;
 
-    gtk_widget_queue_draw(d->demo_area);
+    (void)store;
+    gtk_widget_queue_draw(area);
 }
 
-static void on_demo_toggle(AdwSwitchRow *row, GParamSpec *pspec, gpointer data)
+static void dialog_free(gpointer data)
 {
     KeyDialog *d = data;
-    gboolean active = adw_switch_row_get_active(row);
 
-    (void)pspec;
-    gtk_widget_set_visible(d->demo_area, active);
-    if (active && !d->demo_timer) {
-        d->demo_timer = g_timeout_add(16, demo_tick, d);
+    if (d->demo_active) {
+        as_store_analog_stop(d->store);
     }
-    if (!active && d->demo_timer) {
-        g_source_remove(d->demo_timer);
-        d->demo_timer = 0;
-        d->demo_held = FALSE;
-        d->demo_depth = 0.0;
-        gtk_widget_queue_draw(d->demo_area);
-    }
+    g_free(d);
 }
 
 static GtkWidget *make_legend(void)
@@ -704,16 +719,6 @@ static GtkWidget *make_legend(void)
     gtk_box_append(GTK_BOX(box), snap);
     gtk_box_append(GTK_BOX(box), changed);
     return box;
-}
-
-static void dialog_free(gpointer data)
-{
-    KeyDialog *d = data;
-
-    if (d->demo_timer) {
-        g_source_remove(d->demo_timer);
-    }
-    g_free(d);
 }
 
 static void load_css(void)
@@ -893,7 +898,22 @@ void as_key_dialog_open(GtkWindow *parent, AsStore *store, const char *path)
         gtk_widget_set_visible(d->demo_area, FALSE);
         gtk_drawing_area_set_draw_func(GTK_DRAWING_AREA(d->demo_area),
                                        demo_draw, d, NULL);
+        g_signal_connect_object(store, "analog", G_CALLBACK(on_analog),
+                                d->demo_area, 0);
         adw_preferences_group_add(demo, d->demo_area);
+        {
+            GtkWidget *zone_legend = gtk_label_new(NULL);
+            char *markup =
+                g_strdup_printf(
+                    "<span foreground='#3584e4'>▬</span> до срабатывания   "
+                    "<span foreground='#2ec27e'>▬</span> нажата   "
+                    "<span foreground='#e66100'>▬</span> отпускание");
+
+            gtk_label_set_markup(GTK_LABEL(zone_legend), markup);
+            gtk_label_set_wrap(GTK_LABEL(zone_legend), TRUE);
+            g_free(markup);
+            adw_preferences_group_add(demo, zone_legend);
+        }
         gtk_box_append(GTK_BOX(outer), GTK_WIDGET(demo));
     }
 
@@ -923,11 +943,20 @@ void as_key_dialog_open(GtkWindow *parent, AsStore *store, const char *path)
         g_signal_connect(keys, "key-released", G_CALLBACK(on_test_released), d);
         gtk_widget_add_controller(window, keys);
     }
-    gtk_window_set_child(d->window, outer);
+    {
+        GtkWidget *scroll = gtk_scrolled_window_new();
+
+        gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scroll),
+                                       GTK_POLICY_AUTOMATIC,
+                                       GTK_POLICY_AUTOMATIC);
+        gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(scroll), outer);
+        gtk_window_set_child(d->window, scroll);
+    }
     /* The page may still be waiting for the first scan; read the values now
      * and again once the store has them, and follow later writes the same
      * way so the sliders never show stale numbers. */
     g_signal_connect(store, "changed", G_CALLBACK(on_store_changed), d);
+    d->demo_key = keyboxes[0].pos;
     d->updating = TRUE;
     gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(d->buttons[0]), TRUE);
     d->updating = FALSE;

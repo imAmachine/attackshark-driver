@@ -14,6 +14,7 @@ enum {
     SIGNAL_CHANGED,
     SIGNAL_ERROR,
     SIGNAL_PERMISSIONS_FIXED,
+    SIGNAL_ANALOG,
     N_SIGNALS,
 };
 
@@ -40,6 +41,11 @@ struct _AsStore {
     GHashTable *handles;   /* path -> Handle*, worker thread only */
     gboolean busy;
     guint settle_id;
+    /* Travel demo: one poll of the analog report in flight at a time. */
+    gboolean analog_running;
+    char analog_path[64];
+    gint travel[AS_KB_KEY_MAX];
+    guint analog_timer;
 };
 
 G_DEFINE_TYPE(AsStore, as_store, G_TYPE_OBJECT)
@@ -442,6 +448,149 @@ static void refresh_job_done(gpointer data, GError *error, gpointer user_data)
     if (!self->settle_id) {
         self->settle_id = g_timeout_add_seconds(2, settle_cb, self);
     }
+}
+
+/* ---------------------------- analog stream ---------------------------- */
+
+static void analog_job_run(gpointer data, GError **error);
+static void analog_job_done(gpointer data, GError *error, gpointer user_data);
+
+static gboolean analog_schedule(gpointer data)
+{
+    AsStore *self = data;
+
+    self->analog_timer = 0;
+    if (!self->analog_running) {
+        return G_SOURCE_REMOVE;
+    }
+    as_job_run(analog_job_run, self, NULL, analog_job_done, NULL, NULL);
+    return G_SOURCE_REMOVE;
+}
+
+static void analog_job_run(gpointer data, GError **error)
+{
+    AsStore *self = data;
+    Handle *h = g_hash_table_lookup(self->handles, self->analog_path);
+    int32_t values[AS_KB_KEY_MAX] = { 0 };
+    uint8_t buf[64];
+    int n;
+
+    (void)error;
+    if (!self->analog_running || !h || h->kind != AS_DEVICE_KEYBOARD ||
+        handle_open(h) < 0) {
+        return;
+    }
+    if (!h->kb.analog_open) {
+        if (as_keyboard_enable_stream(&h->kb, 1) < 0) {
+            return;
+        }
+        if (as_keyboard_open_analog(&h->kb) < 0) {
+            as_keyboard_enable_stream(&h->kb, 0);
+            return;
+        }
+    }
+    n = as_hid_read(&h->kb.analog, buf, sizeof(buf), 8);
+    if (n > 0 && as_kb_parse_analog(buf, (size_t)n, values)) {
+        for (int i = 0; i < AS_KB_KEY_MAX; i++) {
+            g_atomic_int_set(&self->travel[i], values[i]);
+        }
+    }
+}
+
+static void analog_job_done(gpointer data, GError *error, gpointer user_data)
+{
+    AsStore *self = data;
+
+    (void)error;
+    (void)user_data;
+    if (!self->analog_running) {
+        return;
+    }
+    g_signal_emit(self, signals[SIGNAL_ANALOG], 0);
+    if (!self->analog_timer) {
+        self->analog_timer = g_timeout_add(16, analog_schedule, self);
+    }
+}
+
+typedef struct {
+    AsStore *self;
+    char *path;
+} AnalogOff;
+
+static void analog_off_free(gpointer data)
+{
+    AnalogOff *off = data;
+
+    g_free(off->path);
+    g_free(off);
+}
+
+static void analog_off_run(gpointer data, GError **error)
+{
+    AnalogOff *off = data;
+    Handle *h = g_hash_table_lookup(off->self->handles, off->path);
+    uint8_t buf[64];
+
+    (void)error;
+    if (!h || h->kind != AS_DEVICE_KEYBOARD) {
+        return;
+    }
+    /* Drain what already sits in the endpoint, then stop the stream. */
+    while (as_hid_read(&h->kb.analog, buf, sizeof(buf), 0) > 0) {
+    }
+    as_keyboard_enable_stream(&h->kb, 0);
+    if (h->kb.analog_open) {
+        as_hid_close(&h->kb.analog);
+        h->kb.analog_open = 0;
+    }
+}
+
+gboolean as_store_analog_start(AsStore *self, const char *path)
+{
+    if (!as_store_lookup(self, path)) {
+        return FALSE;
+    }
+    if (self->analog_running) {
+        return strcmp(self->analog_path, path) == 0;
+    }
+    g_strlcpy(self->analog_path, path, sizeof(self->analog_path));
+    self->analog_running = TRUE;
+    for (int i = 0; i < AS_KB_KEY_MAX; i++) {
+        g_atomic_int_set(&self->travel[i], 0);
+    }
+    as_job_run(analog_job_run, self, NULL, analog_job_done, NULL, NULL);
+    return TRUE;
+}
+
+void as_store_analog_stop(AsStore *self)
+{
+    AnalogOff *off;
+
+    if (!self->analog_running && !self->analog_timer) {
+        return;
+    }
+    off = g_new0(AnalogOff, 1);
+    off->self = self;
+    off->path = g_strdup(self->analog_path);
+    self->analog_running = FALSE;
+    if (self->analog_timer) {
+        g_source_remove(self->analog_timer);
+        self->analog_timer = 0;
+    }
+    self->analog_path[0] = 0;
+    for (int i = 0; i < AS_KB_KEY_MAX; i++) {
+        g_atomic_int_set(&self->travel[i], 0);
+    }
+    as_job_run(analog_off_run, off, analog_off_free, NULL, NULL, NULL);
+}
+
+int as_store_travel(AsStore *self, const char *path, int key)
+{
+    if (!self->analog_running || key < 0 || key >= AS_KB_KEY_MAX ||
+        strcmp(self->analog_path, path) != 0) {
+        return 0;
+    }
+    return g_atomic_int_get(&self->travel[key]);
 }
 
 /* ------------------------------- writes ------------------------------- */
@@ -878,6 +1027,11 @@ gboolean as_store_apply(AsStore *self, const char *path, const AsOpRequest *req)
 
 void as_store_shutdown(AsStore *self)
 {
+    self->analog_running = FALSE;
+    if (self->analog_timer) {
+        g_source_remove(self->analog_timer);
+        self->analog_timer = 0;
+    }
     if (self->settle_id) {
         g_source_remove(self->settle_id);
         self->settle_id = 0;
@@ -910,6 +1064,9 @@ static void as_store_class_init(AsStoreClass *klass)
     signals[SIGNAL_PERMISSIONS_FIXED] =
         g_signal_new("permissions-fixed", G_TYPE_FROM_CLASS(klass),
                      G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 0);
+    signals[SIGNAL_ANALOG] =
+        g_signal_new("analog", G_TYPE_FROM_CLASS(klass), G_SIGNAL_RUN_LAST, 0,
+                     NULL, NULL, NULL, G_TYPE_NONE, 0);
 }
 
 static void as_store_init(AsStore *self)
