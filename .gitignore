@@ -5,6 +5,10 @@ libattackshark.a
 tests/test_codec
 tests/test_detect
 tests/test_gui_store
+tests/test_gui_ui
+tests/test_cli
+tests/test_mouse
+tests/test_keyboard
 compile_commands.json
 ref/
 .cache/

@@ -37,7 +37,7 @@ DESKTOPDIR ?= $(PREFIX)/share/applications
 ICONDIR    ?= $(PREFIX)/share/icons/hicolor/scalable/apps
 POLKITDIR  ?= /usr/share/polkit-1/actions
 
-.PHONY: all gui clean install install-gui uninstall check test test-store compiledb
+.PHONY: all gui clean install install-gui uninstall check test test-store test-ui compiledb
 
 STORE_TEST_SRC := tests/test_gui_store.c src/gui/as-store.c src/gui/as-worker.c
 
@@ -60,7 +60,7 @@ endif
 $(GUI): $(GUI_OBJ) $(LIB)
 	$(CC) $(LDFLAGS) -o $@ $(GUI_OBJ) $(LIB) $(GUI_LIBS) $(LDLIBS) -lm
 
-src/gui/%.o: src/gui/%.c include/attackshark.h
+src/gui/%.o: src/gui/%.c include/attackshark.h $(wildcard src/gui/*.h)
 	$(CC) $(CPPFLAGS) $(GUI_CFLAGS) $(CFLAGS) -c -o $@ $<
 
 %.o: %.c include/attackshark.h src/internal.h
@@ -70,8 +70,9 @@ install: $(BIN)
 	install -Dm755 $(BIN) $(DESTDIR)$(BINDIR)/$(BIN)
 	install -Dm644 udev/70-attackshark.rules $(DESTDIR)$(UDEVDIR)/70-attackshark.rules
 	install -d $(DESTDIR)$(SYSTEMDDIR)
-	sed 's|@BINDIR@|$(BINDIR)|g' systemd/attackshark.service \
-		> $(DESTDIR)$(SYSTEMDDIR)/attackshark.service
+	sed -e 's|@BINDIR@|$(BINDIR)|g' -e 's|@CONFDIR@|$(CONFDIR)|g' \
+		systemd/attackshark.service > $(DESTDIR)$(SYSTEMDDIR)/attackshark.service
+	chmod 644 $(DESTDIR)$(SYSTEMDDIR)/attackshark.service
 	test -e $(DESTDIR)$(CONFDIR)/attackshark.conf || \
 		install -Dm644 etc/attackshark.conf $(DESTDIR)$(CONFDIR)/attackshark.conf
 
@@ -101,11 +102,30 @@ tests/test_codec: tests/test_codec.c $(LIB)
 tests/test_detect: tests/test_detect.c $(LIB)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ tests/test_detect.c $(LIB) -lm
 
-test: tests/test_codec tests/test_detect
+tests/test_cli: tests/test_cli.c src/main.c $(LIB)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $< $(LIB) -lm
+
+tests/test_mouse: tests/test_mouse.c src/mouse.c $(LIB)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $< $(LIB) -lm
+
+tests/test_keyboard: tests/test_keyboard.c src/keyboard.c $(LIB)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $< $(LIB) -lm
+
+test: tests/test_codec tests/test_detect tests/test_cli tests/test_mouse tests/test_keyboard
 	./tests/test_codec
 	./tests/test_detect
+	./tests/test_cli
+	./tests/test_mouse
+	./tests/test_keyboard
 
-tests/test_gui_store: $(STORE_TEST_SRC) $(LIB)
+tests/test_gui_ui: tests/test_gui_ui.c $(GUI_SRC) $(wildcard src/gui/*.h) $(LIB)
+	$(CC) $(CPPFLAGS) -Isrc/gui $(GUI_CFLAGS) $(CFLAGS) -o $@ tests/test_gui_ui.c \
+		src/gui/as-store.c src/gui/as-worker.c $(LIB) $(GUI_LIBS) -lm
+
+test-ui: tests/test_gui_ui
+	GSK_RENDERER=cairo ./tests/test_gui_ui
+
+tests/test_gui_store: $(STORE_TEST_SRC) $(wildcard src/gui/*.h) $(LIB)
 	$(CC) $(CPPFLAGS) -Isrc/gui $(GUI_CFLAGS) $(CFLAGS) -o $@ $(STORE_TEST_SRC) \
 		$(LIB) $(GUI_LIBS) -lm
 
@@ -120,7 +140,7 @@ check: test $(BIN)
 compiledb:
 	@printf '[\n' > compile_commands.json
 	@set -e; first=1; \
-	for f in $(LIB_SRC) $(BIN_SRC) $(GUI_SRC) $(STORE_TEST_SRC) tests/test_detect.c; do \
+	for f in $(LIB_SRC) $(BIN_SRC) $(GUI_SRC) $(STORE_TEST_SRC) tests/test_detect.c tests/test_cli.c tests/test_mouse.c tests/test_keyboard.c tests/test_gui_ui.c; do \
 		case $$f in src/gui/*) extra="$(GUI_CFLAGS)";; \
 			tests/*) extra="-Isrc/gui $(GUI_CFLAGS)";; *) extra="";; esac; \
 		[ $$first = 1 ] || printf ',\n' >> compile_commands.json; \
@@ -132,4 +152,5 @@ compiledb:
 
 clean:
 	rm -f $(LIB_OBJ) src/main.o src/gui/*.o tests/*.o $(LIB) $(BIN) $(GUI) \
-		tests/test_codec tests/test_detect tests/test_gui_store
+		tests/test_codec tests/test_detect tests/test_gui_store tests/test_cli \
+		tests/test_mouse tests/test_keyboard tests/test_gui_ui

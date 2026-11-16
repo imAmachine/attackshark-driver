@@ -77,21 +77,31 @@ info` и `upower -d` (сервис Battery `0x180f`).
 - `reset` — сброс к заводским настройкам.
 
 Любая команда поддерживает `--json`, все команды можно выполнять из файла
-через `attackshark apply FILE`.
+через `attackshark apply FILE`. Глобальные `--json` и `--optional` можно
+указывать перед командой или после неё. Разделитель `--` завершает разбор
+глобальных флагов, например `attackshark --json mouse backup -- --optional`.
+Чтение `keyboard travel` показывает слот 0 и признак `uniform` в JSON;
+если значения слотов различаются, используйте `keyboard keys` для деталей.
 
 ## Сборка и установка
 
 ```sh
 make            # соберёт ./attackshark (и GUI, если есть GTK4)
 make gui        # только GUI: ./attackshark-gui
-make test       # проверка кодеков DPI, частоты опроса и хода клавиш
+make test       # кодеки и регрессии CLI/протокола без обращения к устройствам
+make test-ui    # регрессии GUI без записи в устройства (GTK4/libadwaita)
+make test-store # аппаратный smoke-тест, повторяет текущую частоту опроса
 sudo make install
 sudo make install-gui     # бинарник, .desktop и иконка
 ```
 
 `make install` ставит бинарник в `/usr/local/bin`, правила udev
-(`/etc/udev/rules.d/70-attackshark.rules`) и юнит
-`/etc/systemd/system/attackshark.service`.
+(`/etc/udev/rules.d/70-attackshark.rules`), юнит
+`/etc/systemd/system/attackshark.service` и загрузочный профиль
+`/etc/attackshark.conf`. Существующий профиль не перезаписывается и не
+удаляется при `make uninstall`. Каталог профиля можно изменить через
+`CONFDIR`; сервис будет читать профиль из выбранного каталога.
+Для установки в дерево пакета поддерживается `DESTDIR`.
 
 Если ставите драйвер не из пакета (или просто распаковали архив), правила
 udev руками копировать не нужно: драйвер ставит их сам.
