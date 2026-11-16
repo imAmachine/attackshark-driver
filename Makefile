@@ -32,6 +32,7 @@ PREFIX     ?= /usr/local
 BINDIR     ?= $(PREFIX)/bin
 UDEVDIR    ?= /etc/udev/rules.d
 SYSTEMDDIR ?= /etc/systemd/system
+CONFDIR    ?= /etc
 DESKTOPDIR ?= $(PREFIX)/share/applications
 ICONDIR    ?= $(PREFIX)/share/icons/hicolor/scalable/apps
 POLKITDIR  ?= /usr/share/polkit-1/actions
@@ -68,8 +69,11 @@ src/gui/%.o: src/gui/%.c include/attackshark.h
 install: $(BIN)
 	install -Dm755 $(BIN) $(DESTDIR)$(BINDIR)/$(BIN)
 	install -Dm644 udev/70-attackshark.rules $(DESTDIR)$(UDEVDIR)/70-attackshark.rules
+	install -d $(DESTDIR)$(SYSTEMDDIR)
 	sed 's|@BINDIR@|$(BINDIR)|g' systemd/attackshark.service \
 		> $(DESTDIR)$(SYSTEMDDIR)/attackshark.service
+	test -e $(DESTDIR)$(CONFDIR)/attackshark.conf || \
+		install -Dm644 etc/attackshark.conf $(DESTDIR)$(CONFDIR)/attackshark.conf
 
 install-gui: $(GUI)
 	install -Dm755 $(GUI) $(DESTDIR)$(BINDIR)/$(GUI)
