@@ -280,5 +280,4 @@ data/                   .desktop, иконка GUI, policy-файл polkit дл�
 udev/, systemd/, etc/   установка и автозапуск
 docs/PROTOCOL.md        описание протоколов
 docs/GUI.md             архитектура GUI
-tools/                  скрипты, которыми протоколы разбирались
 ```

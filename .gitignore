@@ -7,5 +7,7 @@ tests/test_detect
 tests/test_gui_store
 compile_commands.json
 ref/
+.cache/
+.crush/
 core
 core.*
