@@ -19,9 +19,7 @@ const char *as_strerror(int err)
     case EREMOTEIO:
         return "the device refused the command: it answered with status 1 "
                "(understood but not supported)";
-    case EIO:
-        return "the firmware did not keep the value: it reads back differently "
-               "after the write";
+    case EIO: return "input/output error: the operation could not be completed";
     case EINVAL: return "invalid argument";
     case ENOTSUP:
         return "settings are unavailable over Bluetooth: the vendor settings "

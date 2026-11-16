@@ -91,6 +91,8 @@ static void test_dongle_link(void)
     assert(as_hid_has_vendor(&dev));
     assert(strcmp(as_mouse_model_name(dev.pid), "R11 Ultra (2.4 GHz)") == 0);
     assert(strstr(as_strerror(-EREMOTEIO), "refused") != NULL);
+    assert(strstr(as_strerror(-EIO), "input/output") != NULL);
+    assert(strstr(as_strerror(-EIO), "after the write") == NULL);
     printf("dongle link ok\n");
 }
 
