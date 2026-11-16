@@ -72,18 +72,32 @@ int as_ui_light_index(const int *modes, int count, int mode)
     return -1;
 }
 
-const char *as_ui_mag_mode_name(int mode)
+/* Hashing the bits of the double keeps two values that differ below the
+ * hundredths the labels show apart, so a write always refreshes the widgets. */
+static guint32 hash_mm(guint32 h, double mm)
 {
-    static const char *const names[] = { "comfort", "sensitive", "gaming",
-                                        "custom" };
+    guint64 bits;
 
-    return mode >= 0 && mode < (int)G_N_ELEMENTS(names) ? names[mode]
-                                                       : "custom";
+    memcpy(&bits, &mm, sizeof(bits));
+    h = h * 31u + (guint32)(bits >> 32);
+    return h * 31u + (guint32)bits;
 }
 
-int as_ui_mag_mode_count(void)
+guint32 as_ui_device_signature(const AsDevice *dev)
 {
-    return 4;
+    guint32 h = dev->key_code_valid ? 1u : 2u;
+
+    for (int i = 0; i < AS_KB_KEY_MAX; i++) {
+        h = h * 31u + dev->key_code[i];
+        h = hash_mm(h, dev->key_actuation[i]);
+        h = hash_mm(h, dev->key_release[i]);
+        h = hash_mm(h, dev->key_rt_press[i]);
+        h = hash_mm(h, dev->key_rt_release[i]);
+        h = hash_mm(h, dev->key_deadzone[i]);
+        h = h * 31u + dev->key_option[i];
+        h = h * 31u + dev->key_pair[i];
+    }
+    return h;
 }
 
 GdkRGBA as_ui_rgba_from_rgb(const uint8_t rgb[3])
@@ -481,7 +495,8 @@ char *as_ui_keyboard_summary(const AsDevice *dev)
                                dev->profile + 1);
     }
     if (dev->mag_mode >= 0) {
-        g_string_append_printf(s, " · %s", as_ui_mag_mode_name(dev->mag_mode));
+        g_string_append_printf(s, " · %s",
+                               as_kb_mag_mode_name(dev->mag_mode));
     }
     return g_string_free(s, FALSE);
 }
@@ -503,16 +518,29 @@ void as_page_flush(AsPage *page)
         g_source_remove(page->pending_id);
         page->pending_id = 0;
     }
-    if (page->pending_valid) {
-        page->pending_valid = FALSE;
-        as_store_apply(page->store, page->path, &page->pending);
+    for (int i = 0; i < page->pending_count; i++) {
+        as_store_apply(page->store, page->path, &page->pending[i]);
     }
+    page->pending_count = 0;
 }
 
 void as_page_queue(AsPage *page, const AsOpRequest *req)
 {
-    page->pending = *req;
-    page->pending_valid = TRUE;
+    int slot = -1;
+
+    for (int i = 0; i < page->pending_count; i++) {
+        if (page->pending[i].op == req->op) {
+            slot = i;
+            break;
+        }
+    }
+    if (slot < 0) {
+        if (page->pending_count == AS_PAGE_PENDING_MAX) {
+            as_page_flush(page);
+        }
+        slot = page->pending_count++;
+    }
+    page->pending[slot] = *req;
     if (page->pending_id) {
         g_source_remove(page->pending_id);
     }

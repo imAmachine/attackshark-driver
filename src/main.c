@@ -12,9 +12,6 @@
 static int json_mode;
 static int optional_mode;
 
-static const char *const mag_mode_names[] = { "comfort", "sensitive",
-                                              "gaming", "custom" };
-
 /* The driver installs its own udev rules; point the user at that instead of
  * asking them to copy a file into /etc by hand. */
 static void note_udev(void)
@@ -215,7 +212,14 @@ static int cmd_permissions(int argc, char **argv)
             }
             return 1;
         }
-        printf("installed %s\n", as_udev_rule_path());
+        if (json_mode) {
+            char escaped[512];
+
+            printf("{\"installed\":\"%s\"}\n",
+                   json_escape(as_udev_rule_path(), escaped, sizeof(escaped)));
+        } else {
+            printf("installed %s\n", as_udev_rule_path());
+        }
         return 0;
     }
     if (strcmp(sub, "status")) {
@@ -455,8 +459,17 @@ static int cmd_mouse(int argc, char **argv)
                 printf("stage %u set to %u dpi\n", stage, dpi);
             }
         } else if ((ret = mouse_read_settings(&m, &st)) == 0) {
-            for (int i = 0; i < st.dpi_stages; i++) {
-                printf("stage %d  %u dpi\n", i + 1, st.dpi[i]);
+            if (json_mode) {
+                printf("{\"dpi_stages\":%d,\"active_stage\":%d,\"dpi\":[",
+                       st.dpi_stages, st.active_dpi_stage);
+                for (int i = 0; i < st.dpi_stages; i++) {
+                    printf("%s%u", i ? "," : "", st.dpi[i]);
+                }
+                printf("]}\n");
+            } else {
+                for (int i = 0; i < st.dpi_stages; i++) {
+                    printf("stage %d  %u dpi\n", i + 1, st.dpi[i]);
+                }
             }
         }
     } else if (!strcmp(sub, "rate")) {
@@ -474,7 +487,11 @@ static int cmd_mouse(int argc, char **argv)
                 printf("report rate set to %d Hz\n", hz);
             }
         } else if ((ret = mouse_read_settings(&m, &st)) == 0) {
-            printf("%d Hz\n", st.report_rate);
+            if (json_mode) {
+                printf("{\"report_rate\":%d}\n", st.report_rate);
+            } else {
+                printf("%d Hz\n", st.report_rate);
+            }
         }
     } else if ((u8 = mouse_u8_index(sub)) >= 0) {
         int value = 0;
@@ -498,12 +515,20 @@ static int cmd_mouse(int argc, char **argv)
 
         if (!mode && !color && !bright && !speed && !have_on) {
             if ((ret = mouse_read_settings(&m, &st)) == 0) {
-                printf("mode        %d\n", st.light_mode);
-                printf("color       %02x%02x%02x\n", st.light_color[0],
-                       st.light_color[1], st.light_color[2]);
-                printf("brightness  %d\n", st.light_brightness);
-                printf("speed       %d\n", st.light_speed);
-                printf("state       %s\n", st.light_on ? "on" : "off");
+                if (json_mode) {
+                    printf("{\"mode\":%d,\"color\":\"%02x%02x%02x\","
+                           "\"brightness\":%d,\"speed\":%d,\"on\":%d}\n",
+                           st.light_mode, st.light_color[0], st.light_color[1],
+                           st.light_color[2], st.light_brightness,
+                           st.light_speed, st.light_on);
+                } else {
+                    printf("mode        %d\n", st.light_mode);
+                    printf("color       %02x%02x%02x\n", st.light_color[0],
+                           st.light_color[1], st.light_color[2]);
+                    printf("brightness  %d\n", st.light_brightness);
+                    printf("speed       %d\n", st.light_speed);
+                    printf("state       %s\n", st.light_on ? "on" : "off");
+                }
             }
         } else {
             uint8_t c[3] = { 0xff, 0, 0 };
@@ -529,11 +554,21 @@ static int cmd_mouse(int argc, char **argv)
 
         if (!what) {
             if ((ret = mouse_read_settings(&m, &st)) == 0) {
-                printf("mode        %u\n", st.raw[AS_M_DPI_EFFECT_MODE]);
-                printf("brightness  %u\n", st.raw[AS_M_DPI_EFFECT_BRIGHTNESS]);
-                printf("speed       %u\n", st.raw[AS_M_DPI_EFFECT_SPEED]);
-                printf("state       %s\n",
-                       st.raw[AS_M_DPI_EFFECT_STATE] ? "on" : "off");
+                if (json_mode) {
+                    printf("{\"mode\":%u,\"brightness\":%u,\"speed\":%u,"
+                           "\"state\":%s}\n",
+                           st.raw[AS_M_DPI_EFFECT_MODE],
+                           st.raw[AS_M_DPI_EFFECT_BRIGHTNESS],
+                           st.raw[AS_M_DPI_EFFECT_SPEED],
+                           jbool(st.raw[AS_M_DPI_EFFECT_STATE]));
+                } else {
+                    printf("mode        %u\n", st.raw[AS_M_DPI_EFFECT_MODE]);
+                    printf("brightness  %u\n",
+                           st.raw[AS_M_DPI_EFFECT_BRIGHTNESS]);
+                    printf("speed       %u\n", st.raw[AS_M_DPI_EFFECT_SPEED]);
+                    printf("state       %s\n",
+                           st.raw[AS_M_DPI_EFFECT_STATE] ? "on" : "off");
+                }
             }
         } else if (!strcmp(what, "on") || !strcmp(what, "off")) {
             ret = as_mouse_set_u8(&m, AS_M_DPI_EFFECT_STATE,
@@ -578,6 +613,12 @@ static int cmd_mouse(int argc, char **argv)
         ret = as_mouse_read_block(&m, addr, buf, len);
         if (ret < 0) {
             report(ret);
+        } else if (json_mode) {
+            printf("{\"addr\":%u,\"len\":%u,\"data\":\"", addr, len);
+            for (unsigned i = 0; i < len; i++) {
+                printf("%02x", buf[i]);
+            }
+            printf("\"}\n");
         } else {
             for (unsigned i = 0; i < len; i += 16) {
                 printf("%04x:", addr + i);
@@ -619,9 +660,22 @@ static int cmd_mouse(int argc, char **argv)
         }
         fclose(f);
         if (backup) {
-            printf("saved %zu bytes to %s\n", sizeof(buf), file);
+            if (json_mode) {
+                char escaped[1024];
+
+                printf("{\"file\":\"%s\",\"bytes\":%zu}\n",
+                       json_escape(file, escaped, sizeof(escaped)),
+                       sizeof(buf));
+            } else {
+                printf("saved %zu bytes to %s\n", sizeof(buf), file);
+            }
         } else if ((ret = as_mouse_write_block(&m, 0, buf, sizeof(buf))) < 0) {
             report(ret);
+        } else if (json_mode) {
+            char escaped[1024];
+
+            printf("{\"file\":\"%s\",\"bytes\":%zu}\n",
+                   json_escape(file, escaped, sizeof(escaped)), sizeof(buf));
         } else {
             printf("restored %zu bytes from %s\n", sizeof(buf), file);
         }
@@ -649,6 +703,12 @@ static int cmd_mouse(int argc, char **argv)
         ret = as_mouse_raw(&m, (uint8_t)cmd, addr, payload, len, reply);
         if (ret < 0) {
             report(ret);
+        } else if (json_mode) {
+            printf("{\"reply\":\"");
+            for (int i = 0; i < 16; i++) {
+                printf("%02x", reply[i]);
+            }
+            printf("\"}\n");
         } else {
             for (int i = 0; i < 16; i++) {
                 printf("%02x ", reply[i]);
@@ -793,7 +853,7 @@ static void kb_info_text(const struct as_keyboard *kb,
     printf("report rate    %d Hz\n", st->report_rate);
     printf("debounce       %d ms\n", st->debounce);
     if (st->mag_mode >= 0) {
-        printf("magnet mode    %s\n", mag_mode_names[st->mag_mode & 3]);
+        printf("magnet mode    %s\n", as_kb_mag_mode_name(st->mag_mode & 3));
     }
     if (!st->light.valid) {
         return;
@@ -847,9 +907,10 @@ static void stream_analog(struct as_keyboard *kb, int seconds)
         return;
     }
 
-    printf("watching key travel, press Ctrl-C to stop\n");
-    fflush(stdout);
-
+    if (!json_mode) {
+        printf("watching key travel, press Ctrl-C to stop\n");
+        fflush(stdout);
+    }
     while (!stop_stream) {
         int ret = as_hid_read(&kb->analog, buf, sizeof(buf), 500);
 
@@ -869,8 +930,13 @@ static void stream_analog(struct as_keyboard *kb, int seconds)
             if (buf[i] == 0x1b) {
                 int raw = buf[i + 1] | (buf[i + 2] << 8);
 
-                printf("key %3d  raw %4d  %.2f mm\n", buf[i + 3], raw,
-                       raw / 350.0 * 3.4);
+                if (json_mode) {
+                    printf("{\"key\":%d,\"raw\":%d,\"mm\":%.2f}\n",
+                           buf[i + 3], raw, raw / 200.0);
+                } else {
+                    printf("key %3d  raw %4d  %.2f mm\n", buf[i + 3], raw,
+                           raw / 200.0);
+                }
                 fflush(stdout);
                 i += 3;
             }
@@ -1107,7 +1173,7 @@ static int cmd_keyboard(int argc, char **argv)
 
         if (argc > 1) {
             for (int i = 0; i < 4; i++) {
-                if (!strcmp(argv[1], mag_mode_names[i])) {
+                if (!strcmp(argv[1], as_kb_mag_mode_name(i))) {
                     mode = i;
                 }
             }
@@ -1131,9 +1197,9 @@ static int cmd_keyboard(int argc, char **argv)
         const char *dz = opt_value(argc, argv, "--deadzone");
         int rt = opt_flag(argc, argv, "--rt") ||
                  opt_flag(argc, argv, "--rapid-trigger");
-        double actuation = act ? atof(act) : 1.5;
+        double actuation = act ? atof(act) : AS_KB_DEFAULT_ACTUATION;
         double release = rel ? atof(rel) : actuation;
-        double rt_press = rtp ? atof(rtp) : 0.2;
+        double rt_press = rtp ? atof(rtp) : AS_KB_DEFAULT_RT;
         double rt_release = rtr ? atof(rtr) : rt_press;
         double deadzone = dz ? atof(dz) : 0.0;
 
@@ -1149,13 +1215,22 @@ static int cmd_keyboard(int argc, char **argv)
                 as_keyboard_close(&kb);
                 return 1;
             }
-            printf("actuation   %.2f mm\n",
-                   as_kb_value_to_mm(&kb, AS_K_MAG_ACTUATION, act_v[0]));
-            printf("release     %.2f mm\n",
-                   as_kb_value_to_mm(&kb, AS_K_MAG_RELEASE, rel_v[0]));
-            printf("deadzone    %.2f mm\n",
-                   as_kb_value_to_mm(&kb, AS_K_MAG_DEADZONE, dz_v[0]));
-            printf("rapid trig  %s\n", (opt_v[0] & 0x80) ? "on" : "off");
+            if (json_mode) {
+                printf("{\"actuation\":%.2f,\"release\":%.2f,"
+                       "\"deadzone\":%.2f,\"rapid_trigger\":%s}\n",
+                       as_kb_value_to_mm(&kb, AS_K_MAG_ACTUATION, act_v[0]),
+                       as_kb_value_to_mm(&kb, AS_K_MAG_RELEASE, rel_v[0]),
+                       as_kb_value_to_mm(&kb, AS_K_MAG_DEADZONE, dz_v[0]),
+                       jbool(opt_v[0] & 0x80));
+            } else {
+                printf("actuation   %.2f mm\n",
+                       as_kb_value_to_mm(&kb, AS_K_MAG_ACTUATION, act_v[0]));
+                printf("release     %.2f mm\n",
+                       as_kb_value_to_mm(&kb, AS_K_MAG_RELEASE, rel_v[0]));
+                printf("deadzone    %.2f mm\n",
+                       as_kb_value_to_mm(&kb, AS_K_MAG_DEADZONE, dz_v[0]));
+                printf("rapid trig  %s\n", (opt_v[0] & 0x80) ? "on" : "off");
+            }
             as_keyboard_close(&kb);
             return 0;
         }
@@ -1332,8 +1407,14 @@ static int cmd_keyboard(int argc, char **argv)
             as_keyboard_close(&kb);
             return 2;
         }
-        ret = as_keyboard_set_key_travel(&kb, key, rt, act_mm, rel_mm,
-                                         rt_press, rt_release, deadzone);
+        {
+            uint8_t selected[AS_KB_KEY_MAX] = { 0 };
+
+            selected[key] = 1;
+            ret = as_keyboard_set_keys_travel(&kb, selected, rt, act_mm,
+                                              rel_mm, rt_press, rt_release,
+                                              deadzone);
+        }
         if (ret < 0) {
             report(ret);
         } else if (!json_mode) {
@@ -1419,6 +1500,12 @@ static int cmd_keyboard(int argc, char **argv)
         ret = as_keyboard_get_param(&kb, param, values, count);
         if (ret < 0) {
             report(ret);
+        } else if (json_mode) {
+            printf("{\"param\":%d,\"values\":[", param);
+            for (unsigned i = 0; i < count; i++) {
+                printf("%s%d", i ? "," : "", values[i]);
+            }
+            printf("]}\n");
         } else {
             is_option = param == AS_K_MAG_OPTION ||
                         param == AS_K_MAG_SOCD_PAIR;
@@ -1439,7 +1526,11 @@ static int cmd_keyboard(int argc, char **argv)
         ret = as_keyboard_cmd(&kb, AS_K_RESET, NULL, 0, 0, NULL, 0);
         if (ret == 0) {
             sleep(3);
-            printf("factory reset sent\n");
+            if (json_mode) {
+                printf("{\"reset\":true}\n");
+            } else {
+                printf("factory reset sent\n");
+            }
         } else {
             report(ret);
         }
@@ -1536,6 +1627,8 @@ static void usage(void)
         "  mouse dump [ADDR LEN]       hex dump of the config block\n"
         "  mouse backup FILE           save the 256-byte config block\n"
         "  mouse restore FILE          restore the config block\n"
+        "  mouse raw CMD [ADDR] [LEN] [BYTES...]\n"
+        "                              send a raw protocol packet\n"
         "\n"
         "  keyboard info               firmware, profile, light, rate\n"
         "  keyboard light [--mode M] [--brightness 0-4] [--speed 0-4]\n"
@@ -1545,7 +1638,11 @@ static void usage(void)
         "  keyboard rate HZ            polling rate (125..8000)\n"
         "  keyboard profile N          active profile\n"
         "  keyboard debounce MS        debounce time\n"
-        "  keyboard magmode MODE       comfort|sensitive|gaming|custom\n"
+        "  keyboard magmode MODE       ");
+    for (int i = 0; i < as_kb_mag_mode_count(); i++) {
+        printf("%s%s", i ? "|" : "", as_kb_mag_mode_name(i));
+    }
+    printf("\n"
         "  keyboard travel [--actuation MM] [--release MM] [--rt]\n"
         "                  [--rt-press MM] [--rt-release MM] [--deadzone MM]\n"
         "  keyboard keys               list every key with its travel\n"
@@ -1554,6 +1651,8 @@ static void usage(void)
         "  keyboard snap KEY1 KEY2 [last|neutral|first|second] [--full-bottom]\n"
         "  keyboard snap off KEY       remove a Snap Tap pair\n"
         "  keyboard multi PARAM [N]    raw actuation table read\n"
+        "  keyboard multi-set PARAM VALUE [COUNT]\n"
+        "                              raw actuation table write\n"
         "  keyboard stream [--seconds N]  live key travel monitor\n"
         "  keyboard reset              factory reset\n"
         "\n"
@@ -1606,20 +1705,16 @@ static int run_argv(int argc, char **argv)
 
 int main(int argc, char **argv)
 {
-    int i = 1;
+    int n = 1;
 
-    while (i < argc) {
+    for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--json")) {
             json_mode = 1;
         } else if (!strcmp(argv[i], "--optional")) {
             optional_mode = 1;
-        } else if (!strcmp(argv[i], "--help") || !strcmp(argv[i], "-h")) {
-            usage();
-            return 0;
         } else {
-            break;
+            argv[n++] = argv[i];
         }
-        i++;
     }
-    return run_argv(argc - i, argv + i);
+    return run_argv(n - 1, argv + 1);
 }

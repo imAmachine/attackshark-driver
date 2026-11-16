@@ -21,8 +21,9 @@ int as_ui_rate_from_index(guint index);
 GtkStringList *as_ui_light_list_for(int side, int *modes, int max);
 int as_ui_light_index(const int *modes, int count, int mode);
 
-const char *as_ui_mag_mode_name(int mode);
-int as_ui_mag_mode_count(void);
+/* Hash of the matrix the device currently reports: key codes and the five
+ * travel values. Pages and dialogs refresh only when it changes. */
+guint32 as_ui_device_signature(const AsDevice *dev);
 
 GdkRGBA as_ui_rgba_from_rgb(const uint8_t rgb[3]);
 void as_ui_rgb_from_rgba(const GdkRGBA *rgba, uint8_t rgb[3]);
@@ -69,15 +70,18 @@ GtkWidget *as_keyboard_page_new(AsStore *store, const char *path);
 /* --------------------------- device pages --------------------------- */
 
 /* State every device page shares: its snapshot source and the coalesced
- * write queue (a dragged slider must not send one EEPROM write per step). */
+ * write queue. A dragged slider must not send one EEPROM write per step, but
+ * edits of different controls must all arrive, so one slot is kept per op. */
+#define AS_PAGE_PENDING_MAX 8
+
 typedef struct {
     AsStore *store;
     char *path;
     AdwBanner *banner;
     gboolean updating;
     guint pending_id;
-    AsOpRequest pending;
-    gboolean pending_valid;
+    AsOpRequest pending[AS_PAGE_PENDING_MAX];
+    int pending_count;
 } AsPage;
 
 /* Builds the page skeleton (banner + preferences page) and owns the state. */

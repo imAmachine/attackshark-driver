@@ -153,8 +153,13 @@ static void test_analog(void)
                          0x1b, 0x00, 0x00, 0x15 };
 
     assert(as_kb_parse_analog(report, sizeof(report), travel) == 1);
-    /* 0x015e = 350 units, the full 3.4 mm stroke. */
-    assert(travel[9] == 3400);
+    /* 0x015e = 350 counts of 0.005 mm, that is 1.75 mm. */
+    assert(travel[9] == 1750);
+    report[2] = 0xc8;
+    report[3] = 0x00;
+    /* 200 counts is the 1.00 mm actuation point of the default profile. */
+    assert(as_kb_parse_analog(report, sizeof(report), travel) == 1);
+    assert(travel[9] == 1000);
     assert(travel[0x15] == 0);
     assert(as_kb_parse_analog(report, 2, travel) == 0);
     report[0] = 0x04;

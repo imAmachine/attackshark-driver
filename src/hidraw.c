@@ -128,8 +128,6 @@ int as_hid_scan(struct as_hid *out, int max)
         while (fgets(line, sizeof(line), f)) {
             if (strncmp(line, "HID_ID=", 7) == 0) {
                 sscanf(line + 7, "%x:%x:%x", &dev.bus, &dev.vid, &dev.pid);
-            } else if (strncmp(line, "HID_NAME=", 9) == 0) {
-                copy_line(dev.product, sizeof(dev.product), line + 9);
             } else if (strncmp(line, "HID_PHYS=", 9) == 0) {
                 copy_line(dev.phys, sizeof(dev.phys), line + 9);
                 dev.iface = parse_iface(line + 9);

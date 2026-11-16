@@ -117,6 +117,8 @@ typedef struct {
     int demo_key;           /* matrix position the demo follows */
     double switch_bottom;   /* travel of the selected switch type, mm */
     gboolean demo_active;
+    gboolean edited;        /* the user changed a slider: keep those values */
+    guint refresh_id;
     guint32 signature;
     gboolean updating;
 } KeyDialog;
@@ -145,19 +147,6 @@ static gboolean group_contains(int group, unsigned code)
 static void load_values(KeyDialog *d);
 static void refresh_key_styles(KeyDialog *d);
 
-static guint32 device_signature(const AsDevice *dev)
-{
-    guint32 h = (guint32)dev->key_option[0];
-
-    for (int i = 0; i < AS_KB_KEY_MAX; i++) {
-        h = h * 31u + (guint32)(dev->key_actuation[i] * 1000.0);
-        h = h * 31u + (guint32)(dev->key_rt_press[i] * 1000.0);
-        h = h * 31u + dev->key_option[i];
-        h = h * 31u + dev->key_pair[i];
-    }
-    return h;
-}
-
 static void refresh_from_device(KeyDialog *d)
 {
     AsDevice *dev = as_store_lookup(d->store, d->path);
@@ -165,7 +154,7 @@ static void refresh_from_device(KeyDialog *d)
     if (!dev) {
         return;
     }
-    d->signature = device_signature(dev);
+    d->signature = as_ui_device_signature(dev);
     refresh_key_styles(d);
     load_values(d);
 }
@@ -176,15 +165,30 @@ static void on_store_changed(AsStore *store, gpointer data)
     AsDevice *dev = as_store_lookup(store, d->path);
 
     (void)store;
-    if (dev && device_signature(dev) != d->signature) {
+    if (dev && as_ui_device_signature(dev) != d->signature) {
         refresh_from_device(d);
     }
+}
+
+/* A failed write shows up as a toast behind this modal window, so the reason
+ * is repeated where the user is looking. */
+static void on_store_error(AsStore *store, const char *path,
+                           const char *message, gpointer data)
+{
+    KeyDialog *d = data;
+
+    (void)store;
+    if (path && g_strcmp0(path, d->path) != 0) {
+        return;
+    }
+    gtk_label_set_text(GTK_LABEL(d->status), message);
 }
 
 static gboolean refresh_later(gpointer data)
 {
     KeyDialog *d = data;
 
+    d->refresh_id = 0;
     refresh_from_device(d);
     return G_SOURCE_REMOVE;
 }
@@ -262,24 +266,61 @@ static void set_class(GtkWidget *widget, const char *name, gboolean on)
     }
 }
 
+/* Most keys of a board keep the factory travel, so the value the layout shows
+ * most often is the board-wide setting: a key that reads differently is one
+ * the user tuned on its own. The board-wide value is not a protocol field,
+ * it is only the starting point of the highlight below. */
+static double bulk_travel(const AsDevice *dev, int release)
+{
+    int best = -1, best_count = 0;
+
+    for (size_t i = 0; i < G_N_ELEMENTS(keyboxes); i++) {
+        int pos = keyboxes[i].pos;
+        double value = release ? dev->key_release[pos]
+                               : dev->key_actuation[pos];
+        int count = 0;
+
+        for (size_t k = 0; k < G_N_ELEMENTS(keyboxes); k++) {
+            int other = keyboxes[k].pos;
+            double peer = release ? dev->key_release[other]
+                                  : dev->key_actuation[other];
+
+            if (fabs(peer - value) < 0.0025) {
+                count++;
+            }
+        }
+        if (count > best_count) {
+            best_count = count;
+            best = pos;
+        }
+    }
+    if (best < 0) {
+        return 0.0;
+    }
+    return release ? dev->key_release[best] : dev->key_actuation[best];
+}
+
 /* Shows what is already configured on the board: a tinted key has Rapid
  * Trigger, an outlined key belongs to a Snap Tap pair, and a bold key has a
- * travel different from the bulk setting. */
+ * travel different from the rest of the board. */
 static void refresh_key_styles(KeyDialog *d)
 {
     AsDevice *dev = as_store_lookup(d->store, d->path);
+    double bulk_act, bulk_rel;
 
     if (!dev) {
         return;
     }
+    bulk_act = bulk_travel(dev, 0);
+    bulk_rel = bulk_travel(dev, 1);
     for (size_t i = 0; i < G_N_ELEMENTS(keyboxes); i++) {
         int pos = keyboxes[i].pos;
         gboolean snap = as_kb_snap_mode_of(dev->key_option, dev->key_pair,
                                            pos) >= 0;
         gboolean rt = (dev->key_option[pos] & AS_KB_OPTION_RT) != 0;
         gboolean changed =
-            fabs(dev->key_actuation[pos] - dev->actuation) > 0.005 ||
-            fabs(dev->key_release[pos] - dev->release) > 0.005;
+            fabs(dev->key_actuation[pos] - bulk_act) > 0.0025 ||
+            fabs(dev->key_release[pos] - bulk_rel) > 0.0025;
 
         set_class(d->buttons[i], "rt", rt);
         set_class(d->buttons[i], "snap", snap);
@@ -332,7 +373,12 @@ static void on_key_toggled(GtkToggleButton *button, gpointer data)
     }
     d->selected[pos] = gtk_toggle_button_get_active(button) ? 1 : 0;
     update_status(d);
-    load_values(d);
+    /* Selecting another key shows that key's values, but only while the user
+     * has not typed a value of their own: otherwise picking the keys to
+     * apply to would throw the entered travel away. */
+    if (!d->edited) {
+        load_values(d);
+    }
 }
 
 static void sync_selection(KeyDialog *d)
@@ -344,7 +390,9 @@ static void sync_selection(KeyDialog *d)
         }
     }
     update_status(d);
-    load_values(d);
+    if (!d->edited) {
+        load_values(d);
+    }
 }
 
 static gboolean group_all_selected(const KeyDialog *d, int group)
@@ -424,29 +472,29 @@ static void on_apply(GtkButton *button, gpointer data)
         .deadzone = d->dz,
     };
     char buf[64];
+    gboolean restart = d->demo_active;
 
     (void)button;
-    /* The firmware accepts a trigger point up to 2 mm; anything longer is
-     * the bottom-out of the switch, not a trigger. */
-    if (req.actuation > KEY_MAX_TRIGGER) {
-        req.actuation = KEY_MAX_TRIGGER;
-    }
-    if (req.release > KEY_MAX_TRIGGER) {
-        req.release = KEY_MAX_TRIGGER;
-    }
-    if (req.rt_press > KEY_MAX_TRIGGER) {
-        req.rt_press = KEY_MAX_TRIGGER;
-    }
-    if (req.rt_release > KEY_MAX_TRIGGER) {
-        req.rt_release = KEY_MAX_TRIGGER;
+    /* The firmware does not take configuration commands while the travel
+     * stream is running, so the demo pauses for the write and resumes after
+     * it: the worker queue keeps that order. */
+    if (restart) {
+        as_store_analog_stop(d->store);
     }
     memcpy(req.keys, d->selected, sizeof(req.keys));
     if (!as_store_apply(d->store, d->path, &req)) {
+        if (restart) {
+            as_store_analog_start(d->store, d->path);
+        }
         return;
+    }
+    if (restart) {
+        as_store_analog_start(d->store, d->path);
     }
     snprintf(buf, sizeof(buf), "Применено к клавишам: %d",
              selection_count(d));
     gtk_label_set_text(GTK_LABEL(d->status), buf);
+    d->edited = FALSE;
 }
 
 /* Every switch gets the same starting point the vendor uses in its "gaming"
@@ -466,12 +514,13 @@ static void on_switch_type(AdwComboRow *row, GParamSpec *pspec, gpointer data)
     previous = d->updating;
     d->updating = TRUE;
     d->switch_bottom = switch_presets[selected].bottom_out;
-    as_ui_slider_set(d->actuation, 1.5);
-    as_ui_slider_set(d->release, 1.5);
-    as_ui_slider_set(d->rt_press, 0.2);
-    as_ui_slider_set(d->rt_release, 0.2);
+    as_ui_slider_set(d->actuation, AS_KB_DEFAULT_ACTUATION);
+    as_ui_slider_set(d->release, AS_KB_DEFAULT_ACTUATION);
+    as_ui_slider_set(d->rt_press, AS_KB_DEFAULT_RT);
+    as_ui_slider_set(d->rt_release, AS_KB_DEFAULT_RT);
     as_ui_switch_set(d->rt, &d->updating, TRUE);
     d->updating = previous;
+    d->edited = TRUE;
 }
 
 static void on_close(GtkButton *button, gpointer data)
@@ -484,6 +533,7 @@ static void on_slider_changed(gpointer data)
 {
     KeyDialog *d = data;
 
+    d->edited = TRUE;
     gtk_widget_queue_draw(d->demo_area);
 }
 
@@ -695,6 +745,12 @@ static void dialog_free(gpointer data)
 {
     KeyDialog *d = data;
 
+    if (d->refresh_id) {
+        g_source_remove(d->refresh_id);
+    }
+    /* The store outlives this dialog, so a handler left behind would read
+     * freed memory on the next refresh. */
+    g_signal_handlers_disconnect_by_data(d->store, d);
     if (d->demo_active) {
         as_store_analog_stop(d->store);
     }
@@ -866,14 +922,14 @@ void as_key_dialog_open(GtkWindow *parent, AsStore *store, const char *path)
                          G_CALLBACK(on_switch_type), d);
         adw_preferences_group_add(group, GTK_WIDGET(d->switch_row));
     }
-    d->actuation = make_slider(group, "Точка срабатывания", 0.0, 2.0,
-                               &d->act, 1.5, d);
-    d->release = make_slider(group, "Точка отпускания", 0.0, 2.0, &d->rel, 1.5,
-                             d);
-    d->rt_press = make_slider(group, "Rapid Trigger: нажатие", 0.0, 2.0,
-                              &d->rtp, 0.2, d);
-    d->rt_release = make_slider(group, "Rapid Trigger: отпускание", 0.0, 2.0,
-                                &d->rtr, 0.2, d);
+    d->actuation = make_slider(group, "Точка срабатывания", 0.0,
+                               KEY_MAX_TRIGGER, &d->act, AS_KB_DEFAULT_ACTUATION, d);
+    d->release = make_slider(group, "Точка отпускания", 0.0, KEY_MAX_TRIGGER,
+                             &d->rel, AS_KB_DEFAULT_ACTUATION, d);
+    d->rt_press = make_slider(group, "Rapid Trigger: нажатие", 0.0,
+                              KEY_MAX_TRIGGER, &d->rtp, AS_KB_DEFAULT_RT, d);
+    d->rt_release = make_slider(group, "Rapid Trigger: отпускание", 0.0,
+                                KEY_MAX_TRIGGER, &d->rtr, AS_KB_DEFAULT_RT, d);
     d->deadzone = make_slider(group, "Мёртвая зона", 0.0, 1.0, &d->dz, 0.3, d);
     d->rt = as_ui_switch_row("Rapid Trigger", NULL);
     gtk_widget_set_tooltip_text(GTK_WIDGET(d->rt),
@@ -956,11 +1012,12 @@ void as_key_dialog_open(GtkWindow *parent, AsStore *store, const char *path)
      * and again once the store has them, and follow later writes the same
      * way so the sliders never show stale numbers. */
     g_signal_connect(store, "changed", G_CALLBACK(on_store_changed), d);
+    g_signal_connect(store, "error", G_CALLBACK(on_store_error), d);
     d->demo_key = keyboxes[0].pos;
     d->updating = TRUE;
     gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(d->buttons[0]), TRUE);
     d->updating = FALSE;
     sync_selection(d);
     gtk_window_present(d->window);
-    g_timeout_add(500, refresh_later, d);
+    d->refresh_id = g_timeout_add(500, refresh_later, d);
 }

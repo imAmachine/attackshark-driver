@@ -21,6 +21,11 @@
 #define REPORT_LEN AS_K_REPORT_LEN
 #define HS_TIMEOUT_MS 400
 #define IO_DELAY_US 10000
+/* The firmware needs a moment after a flash commit before the tables it
+ * reports match what was written; reading too early answers with the request
+ * itself, which the parameter read reports as "no data". */
+#define VERIFY_DELAY_US 150000
+#define VERIFY_RETRY_US 150000
 
 /* Analog travel stream: usage page 0xFFFF / usage 0x01, report ID 5. */
 static const unsigned char analog_probe[] = {
@@ -213,14 +218,24 @@ int as_keyboard_enable_stream(struct as_keyboard *kb, int on)
 
 /* ---------- Hall-effect value encoding ---------- */
 
-static void read_usb_version(struct as_keyboard *kb, const uint8_t *out)
+/* The version decides whether a travel value is one byte or two, so a wrong
+ * answer silently turns every threshold into a different physical distance.
+ * While the device is busy with a flash write it answers this query with the
+ * request itself, which reads as version 0, and 0xFFFFFFFF is what a link
+ * that does not report a version returns: neither may be cached. */
+static int read_usb_version(struct as_keyboard *kb, const uint8_t *out)
 {
-    kb->usb_version = (uint32_t)out[1] | ((uint32_t)out[2] << 8) |
-                      ((uint32_t)out[3] << 16) | ((uint32_t)out[4] << 24);
-    kb->usb_version_known = 1;
-    kb->mag_mult = kb->usb_version >= 1280 ? 200   /* 0.005 mm */
-                 : kb->usb_version >= 768  ? 100   /* 0.01 mm */
-                                           : 10;   /* 0.1 mm */
+    uint32_t version = (uint32_t)out[1] | ((uint32_t)out[2] << 8) |
+                       ((uint32_t)out[3] << 16) | ((uint32_t)out[4] << 24);
+
+    if (version == 0 || version == 0xffffffffu) {
+        return 0;
+    }
+    kb->usb_version = version;
+    kb->mag_mult = version >= 1280 ? 200   /* 0.005 mm */
+                 : version >= 768  ? 100   /* 0.01 mm */
+                                   : 10;   /* 0.1 mm */
+    return 1;
 }
 
 int as_keyboard_precision(struct as_keyboard *kb)
@@ -230,12 +245,17 @@ int as_keyboard_precision(struct as_keyboard *kb)
     if (kb->mag_mult) {
         return kb->mag_mult;
     }
-    if (as_keyboard_cmd(kb, AS_K_GET_USB_VERSION, NULL, 0, 0, out,
-                        HS_TIMEOUT_MS) != 0) {
-        return -ENODATA;
+    for (int attempt = 0; attempt < 2; attempt++) {
+        if (attempt) {
+            usleep(VERIFY_RETRY_US);
+        }
+        if (as_keyboard_cmd(kb, AS_K_GET_USB_VERSION, NULL, 0, 0, out,
+                            HS_TIMEOUT_MS) == 0 &&
+            read_usb_version(kb, out)) {
+            return kb->mag_mult;
+        }
     }
-    read_usb_version(kb, out);
-    return kb->mag_mult;
+    return -ENODATA;
 }
 
 static int param_width(struct as_keyboard *kb, int param)
@@ -279,6 +299,20 @@ double as_kb_value_to_mm(struct as_keyboard *kb, int param, int32_t raw)
     return (double)raw / mult;
 }
 
+/* An unsupported read comes back as the request itself: the command byte, the
+ * parameter, the "all keys" flag, the page number and the request checksum.
+ * Real values can hit those bytes by accident, so the checksum byte at [7] is
+ * part of the test, which makes a false positive practically impossible. */
+static int is_echo(const uint8_t *out, int param, int page)
+{
+    unsigned sum = AS_K_GET_MULTI_MAGNETISM + (unsigned)param + 1u +
+                   (unsigned)page;
+
+    return out[0] == AS_K_GET_MULTI_MAGNETISM && out[1] == (uint8_t)param &&
+           out[2] == 1 && out[3] == (uint8_t)page &&
+           out[7] == (uint8_t)(0xff - (sum & 0xff));
+}
+
 int as_keyboard_get_param(struct as_keyboard *kb, int param, int32_t *values,
                           size_t count)
 {
@@ -288,7 +322,7 @@ int as_keyboard_get_param(struct as_keyboard *kb, int param, int32_t *values,
     if (width < 0) {
         return width;
     }
-    per_page = 64 / (size_t)width;
+    per_page = AS_K_MAG_READ_PAGE / (size_t)width;
     pages = (count + per_page - 1) / per_page;
 
     for (size_t page = 0; page < pages; page++) {
@@ -296,11 +330,28 @@ int as_keyboard_get_param(struct as_keyboard *kb, int param, int32_t *values,
         uint8_t out[REPORT_LEN];
         size_t offset = page * per_page;
         size_t n = count - offset < per_page ? count - offset : per_page;
-        int ret = as_keyboard_cmd_raw(kb, AS_K_GET_MULTI_MAGNETISM, args, 3, 0,
-                                      out, HS_TIMEOUT_MS);
+        int ret;
 
-        if (ret < 0) {
-            return ret;
+        for (int attempt = 0;; attempt++) {
+            ret = as_keyboard_cmd_raw(kb, AS_K_GET_MULTI_MAGNETISM, args, 3, 0,
+                                      out, HS_TIMEOUT_MS);
+            if (ret < 0) {
+                return ret;
+            }
+            if (!is_echo(out, param, (int)page) || attempt > 0) {
+                break;
+            }
+            /* The device echoes the request while it is busy with a flash
+             * write: wait and ask once more before giving up on this page. */
+            usleep(VERIFY_RETRY_US);
+        }
+        if (is_echo(out, param, (int)page)) {
+            /* The page does not exist or the device stayed silent: treat it
+             * as zeroes like the vendor driver does. A travel write is
+             * verified separately, so silence cannot pass for a stored
+             * value. */
+            memset(values + offset, 0, n * sizeof(values[0]));
+            continue;
         }
         for (size_t i = 0; i < n; i++) {
             const uint8_t *p = out + i * (size_t)width;
@@ -314,6 +365,39 @@ int as_keyboard_get_param(struct as_keyboard *kb, int param, int32_t *values,
     }
     return 0;
 }
+
+/* A write is answered with no data at all, so a write the firmware rejects
+ * looks exactly like an accepted one. Reading the table back is the only way
+ * to tell them apart, and it also catches the firmware that keeps the values
+ * in RAM until the next profile switch. */
+static int param_matches(struct as_keyboard *kb, int param,
+                         const int32_t *values)
+{
+    int32_t back[AS_KB_KEY_MAX];
+
+    for (int attempt = 0; attempt < 2; attempt++) {
+        size_t i;
+
+        if (attempt) {
+            usleep(VERIFY_RETRY_US);
+        }
+        if (as_keyboard_get_param(kb, param, back, AS_N(back)) < 0) {
+            continue;
+        }
+        for (i = 0; i < AS_N(back); i++) {
+            if (back[i] != values[i]) {
+                break;
+            }
+        }
+        if (i == AS_N(back)) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* Same, for the single-key write path, where only one value is expected to
+ * change and the other positions must keep theirs. */
 
 int as_keyboard_set_param(struct as_keyboard *kb, int param,
                           const int32_t *values, size_t count, int save)
@@ -427,8 +511,9 @@ int as_kb_parse_analog(const uint8_t *buf, size_t len, int32_t *travel)
         if (key < 0 || key >= AS_KB_KEY_MAX) {
             continue;
         }
-        /* The stream reports about 350 units over the 3.4 mm full travel. */
-        travel[key] = raw * 3400 / 350;
+        /* The stream uses the travel table's unit: 200 counts per mm, so one
+         * count is 0.005 mm and the result is in thousandths of a millimetre. */
+        travel[key] = raw * 5;
         if (travel[key] > 5000) {
             travel[key] = 5000;
         }
@@ -619,58 +704,115 @@ int as_keyboard_set_mag_mode(struct as_keyboard *kb, int mode)
     return set_u8(kb, AS_K_SET_MAGNETISM_MODE, (uint8_t)mode);
 }
 
-/* Writes one value to every key of a Hall-effect parameter page. */
-static int set_all(struct as_keyboard *kb, int param, int32_t value, int save)
-{
-    int32_t values[128];
+static const char *const mag_mode_names[] = { "comfort", "sensitive",
+                                              "gaming", "custom" };
 
-    for (size_t i = 0; i < AS_N(values); i++) {
-        values[i] = value;
+const char *as_kb_mag_mode_name(int mode)
+{
+    return mode >= 0 && mode < (int)AS_N(mag_mode_names)
+               ? mag_mode_names[mode]
+               : "custom";
+}
+
+int as_kb_mag_mode_count(void)
+{
+    return (int)AS_N(mag_mode_names);
+}
+
+/* Encodes the five travel values once, so every write path rejects an
+ * unusable firmware precision the same way. */
+static int encode_travel(struct as_keyboard *kb, double actuation,
+                         double release, double rt_press, double rt_release,
+                         double deadzone, int32_t values[5])
+{
+    values[0] = encode_value(kb, AS_K_MAG_ACTUATION, actuation);
+    values[1] = encode_value(kb, AS_K_MAG_RELEASE, release);
+    values[2] = encode_value(kb, AS_K_MAG_DEADZONE, deadzone);
+    values[3] = encode_value(kb, AS_K_MAG_RT_PRESS, rt_press);
+    values[4] = encode_value(kb, AS_K_MAG_RT_RELEASE, rt_release);
+    for (int i = 0; i < 5; i++) {
+        if (values[i] < 0) {
+            return -ENODATA;
+        }
     }
-    return as_keyboard_set_param(kb, param, values, AS_N(values), save);
+    return 0;
+}
+
+/* Writes the travel tables for the keys picked in mask (NULL means every key)
+ * and reads them back. The option page is written last and carries the save
+ * flag; its mode bits (Snap Tap and friends) survive the change. */
+static int write_travel(struct as_keyboard *kb, const uint8_t *mask,
+                        int rapid_trigger, const int32_t values[5])
+{
+    int32_t act[AS_KB_KEY_MAX], rel[AS_KB_KEY_MAX], dz[AS_KB_KEY_MAX];
+    int32_t rtp[AS_KB_KEY_MAX], rtr[AS_KB_KEY_MAX], opt[AS_KB_KEY_MAX];
+    int any = mask == NULL;
+    int ret;
+
+    if (as_keyboard_get_param(kb, AS_K_MAG_ACTUATION, act, AS_KB_KEY_MAX) ||
+        as_keyboard_get_param(kb, AS_K_MAG_RELEASE, rel, AS_KB_KEY_MAX) ||
+        as_keyboard_get_param(kb, AS_K_MAG_DEADZONE, dz, AS_KB_KEY_MAX) ||
+        as_keyboard_get_param(kb, AS_K_MAG_RT_PRESS, rtp, AS_KB_KEY_MAX) ||
+        as_keyboard_get_param(kb, AS_K_MAG_RT_RELEASE, rtr, AS_KB_KEY_MAX) ||
+        as_keyboard_get_param(kb, AS_K_MAG_OPTION, opt, AS_KB_KEY_MAX)) {
+        return -ENODATA;
+    }
+    for (int i = 0; i < AS_KB_KEY_MAX; i++) {
+        if (mask && !mask[i]) {
+            continue;
+        }
+        any = 1;
+        act[i] = values[0];
+        rel[i] = values[1];
+        dz[i] = values[2];
+        if (rapid_trigger) {
+            rtp[i] = values[3];
+            rtr[i] = values[4];
+        }
+        opt[i] = (opt[i] & ~AS_KB_OPTION_RT) |
+                 (rapid_trigger ? AS_KB_OPTION_RT : 0);
+    }
+    if (!any) {
+        return 0;
+    }
+    if ((ret = as_keyboard_set_param(kb, AS_K_MAG_ACTUATION, act,
+                                     AS_KB_KEY_MAX, 0)) ||
+        (ret = as_keyboard_set_param(kb, AS_K_MAG_RELEASE, rel,
+                                     AS_KB_KEY_MAX, 0)) ||
+        (ret = as_keyboard_set_param(kb, AS_K_MAG_DEADZONE, dz,
+                                     AS_KB_KEY_MAX, 0))) {
+        return ret;
+    }
+    if (rapid_trigger &&
+        ((ret = as_keyboard_set_param(kb, AS_K_MAG_RT_PRESS, rtp,
+                                      AS_KB_KEY_MAX, 0)) ||
+         (ret = as_keyboard_set_param(kb, AS_K_MAG_RT_RELEASE, rtr,
+                                      AS_KB_KEY_MAX, 0)))) {
+        return ret;
+    }
+    ret = as_keyboard_set_param(kb, AS_K_MAG_OPTION, opt, AS_KB_KEY_MAX, 1);
+    if (ret < 0) {
+        return ret;
+    }
+    usleep(VERIFY_DELAY_US);
+    if (!param_matches(kb, AS_K_MAG_ACTUATION, act) ||
+        !param_matches(kb, AS_K_MAG_RELEASE, rel) ||
+        !param_matches(kb, AS_K_MAG_DEADZONE, dz) ||
+        !param_matches(kb, AS_K_MAG_OPTION, opt)) {
+        return -EIO;
+    }
+    return 0;
 }
 
 int as_keyboard_set_travel(struct as_keyboard *kb, int rapid_trigger,
                            double actuation, double release, double rt_press,
                            double rt_release, double deadzone)
 {
-    int32_t act = encode_value(kb, AS_K_MAG_ACTUATION, actuation);
-    int32_t rel = encode_value(kb, AS_K_MAG_RELEASE, release);
-    int32_t dz = encode_value(kb, AS_K_MAG_DEADZONE, deadzone);
-    int32_t rtp = encode_value(kb, AS_K_MAG_RT_PRESS, rt_press);
-    int32_t rtr = encode_value(kb, AS_K_MAG_RT_RELEASE, rt_release);
-    int ret;
+    int32_t values[5];
+    int ret = encode_travel(kb, actuation, release, rt_press, rt_release,
+                            deadzone, values);
 
-    if (act < 0 || rel < 0 || dz < 0 || rtp < 0 || rtr < 0) {
-        return -ENODATA;
-    }
-    if ((ret = set_all(kb, AS_K_MAG_ACTUATION, act, 0)) ||
-        (ret = set_all(kb, AS_K_MAG_RELEASE, rel, 0)) ||
-        (ret = set_all(kb, AS_K_MAG_DEADZONE, dz, 0))) {
-        return ret;
-    }
-    if (rapid_trigger &&
-        ((ret = set_all(kb, AS_K_MAG_RT_PRESS, rtp, 0)) ||
-         (ret = set_all(kb, AS_K_MAG_RT_RELEASE, rtr, 0)))) {
-        return ret;
-    }
-    /* The option page enables Rapid Trigger - write it last and save it. The
-     * low nibble carries the key mode (Snap Tap and friends), so it must
-     * survive a bulk change. */
-    {
-        int32_t options[AS_KB_KEY_MAX];
-
-        if (as_keyboard_get_param(kb, AS_K_MAG_OPTION, options,
-                                  AS_N(options)) == 0) {
-            for (size_t i = 0; i < AS_N(options); i++) {
-                options[i] = (options[i] & ~AS_KB_OPTION_RT) |
-                             (rapid_trigger ? AS_KB_OPTION_RT : 0);
-            }
-            return as_keyboard_set_param(kb, AS_K_MAG_OPTION, options,
-                                         AS_N(options), 1);
-        }
-    }
-    return set_all(kb, AS_K_MAG_OPTION, rapid_trigger ? AS_KB_OPTION_RT : 0, 1);
+    return ret < 0 ? ret : write_travel(kb, NULL, rapid_trigger, values);
 }
 
 uint8_t as_kb_option_value(int mode, int rapid_trigger, int full_bottom)
@@ -680,106 +822,23 @@ uint8_t as_kb_option_value(int mode, int rapid_trigger, int full_bottom)
                       (mode & AS_KB_OPTION_MODE_MASK)));
 }
 
-int as_keyboard_set_key_travel(struct as_keyboard *kb, int key,
-                               int rapid_trigger, double actuation,
-                               double release, double rt_press,
-                               double rt_release, double deadzone)
-{
-    int32_t act = encode_value(kb, AS_K_MAG_ACTUATION, actuation);
-    int32_t rel = encode_value(kb, AS_K_MAG_RELEASE, release);
-    int32_t dz = encode_value(kb, AS_K_MAG_DEADZONE, deadzone);
-    int32_t rtp = encode_value(kb, AS_K_MAG_RT_PRESS, rt_press);
-    int32_t rtr = encode_value(kb, AS_K_MAG_RT_RELEASE, rt_release);
-    int32_t options[AS_KB_KEY_MAX];
-    uint8_t option;
-    int ret;
-
-    if (act < 0 || rel < 0 || dz < 0 || rtp < 0 || rtr < 0) {
-        return -ENODATA;
-    }
-    if (key < 0 || key >= AS_KB_KEY_MAX) {
-        return -EINVAL;
-    }
-    if (as_keyboard_get_param(kb, AS_K_MAG_OPTION, options,
-                              AS_N(options)) < 0) {
-        options[key] = 0;
-    }
-    option = (uint8_t)((options[key] & ~AS_KB_OPTION_RT) |
-                       (rapid_trigger ? AS_KB_OPTION_RT : 0));
-    if ((ret = set_key_values(kb, AS_K_MAG_ACTUATION, key, &act, 1, 0)) ||
-        (ret = set_key_values(kb, AS_K_MAG_RELEASE, key, &rel, 1, 0)) ||
-        (ret = set_key_values(kb, AS_K_MAG_DEADZONE, key, &dz, 1, 0))) {
-        return ret;
-    }
-    if (rapid_trigger &&
-        ((ret = set_key_values(kb, AS_K_MAG_RT_PRESS, key, &rtp, 1, 0)) ||
-         (ret = set_key_values(kb, AS_K_MAG_RT_RELEASE, key, &rtr, 1, 0)))) {
-        return ret;
-    }
-    return set_key_values(kb, AS_K_MAG_OPTION, key,
-                          (int32_t[]){ option }, 1, 1);
-}
-
 int as_keyboard_set_keys_travel(struct as_keyboard *kb,
                                 const uint8_t *selected, int rapid_trigger,
                                 double actuation, double release,
                                 double rt_press, double rt_release,
                                 double deadzone)
 {
-    int32_t act = encode_value(kb, AS_K_MAG_ACTUATION, actuation);
-    int32_t rel = encode_value(kb, AS_K_MAG_RELEASE, release);
-    int32_t dz = encode_value(kb, AS_K_MAG_DEADZONE, deadzone);
-    int32_t rtp = encode_value(kb, AS_K_MAG_RT_PRESS, rt_press);
-    int32_t rtr = encode_value(kb, AS_K_MAG_RT_RELEASE, rt_release);
-    int32_t act_v[AS_KB_KEY_MAX], rel_v[AS_KB_KEY_MAX], dz_v[AS_KB_KEY_MAX];
-    int32_t rtp_v[AS_KB_KEY_MAX], rtr_v[AS_KB_KEY_MAX], opt_v[AS_KB_KEY_MAX];
-    int any = 0, ret;
+    int32_t values[5];
+    int ret = encode_travel(kb, actuation, release, rt_press, rt_release,
+                            deadzone, values);
 
-    if (act < 0 || rel < 0 || dz < 0 || rtp < 0 || rtr < 0) {
-        return -ENODATA;
-    }
-    if (as_keyboard_get_param(kb, AS_K_MAG_ACTUATION, act_v, AS_KB_KEY_MAX) ||
-        as_keyboard_get_param(kb, AS_K_MAG_RELEASE, rel_v, AS_KB_KEY_MAX) ||
-        as_keyboard_get_param(kb, AS_K_MAG_DEADZONE, dz_v, AS_KB_KEY_MAX) ||
-        as_keyboard_get_param(kb, AS_K_MAG_RT_PRESS, rtp_v, AS_KB_KEY_MAX) ||
-        as_keyboard_get_param(kb, AS_K_MAG_RT_RELEASE, rtr_v, AS_KB_KEY_MAX) ||
-        as_keyboard_get_param(kb, AS_K_MAG_OPTION, opt_v, AS_KB_KEY_MAX)) {
-        return -ENODATA;
-    }
-    for (int i = 0; i < AS_KB_KEY_MAX; i++) {
-        if (!selected[i]) {
-            continue;
-        }
-        any = 1;
-        act_v[i] = act;
-        rel_v[i] = rel;
-        dz_v[i] = dz;
-        if (rapid_trigger) {
-            rtp_v[i] = rtp;
-            rtr_v[i] = rtr;
-        }
-        opt_v[i] = (opt_v[i] & ~AS_KB_OPTION_RT) |
-                   (rapid_trigger ? AS_KB_OPTION_RT : 0);
-    }
-    if (!any) {
-        return 0;
-    }
-    if ((ret = as_keyboard_set_param(kb, AS_K_MAG_ACTUATION, act_v,
-                                     AS_KB_KEY_MAX, 0)) ||
-        (ret = as_keyboard_set_param(kb, AS_K_MAG_RELEASE, rel_v,
-                                     AS_KB_KEY_MAX, 0)) ||
-        (ret = as_keyboard_set_param(kb, AS_K_MAG_DEADZONE, dz_v,
-                                     AS_KB_KEY_MAX, 0))) {
+    if (ret < 0) {
         return ret;
     }
-    if (rapid_trigger &&
-        ((ret = as_keyboard_set_param(kb, AS_K_MAG_RT_PRESS, rtp_v,
-                                      AS_KB_KEY_MAX, 0)) ||
-         (ret = as_keyboard_set_param(kb, AS_K_MAG_RT_RELEASE, rtr_v,
-                                      AS_KB_KEY_MAX, 0)))) {
-        return ret;
+    if (!selected) {
+        return -EINVAL;
     }
-    return as_keyboard_set_param(kb, AS_K_MAG_OPTION, opt_v, AS_KB_KEY_MAX, 1);
+    return write_travel(kb, selected, rapid_trigger, values);
 }
 
 static int key_mode_is_snap(int32_t option)
@@ -1022,10 +1081,10 @@ int as_keyboard_read_state(struct as_keyboard *kb, struct as_kb_state *st)
     st->light_on = st->report_rate = st->profile = st->debounce =
         st->revision = st->mag_mode = -1;
 
-    if (kb_query(kb, AS_K_GET_USB_VERSION, NULL, 0, out, &dead) == 0) {
-        read_usb_version(kb, out);
+    if (kb_query(kb, AS_K_GET_USB_VERSION, NULL, 0, out, &dead) == 0 &&
+        read_usb_version(kb, out)) {
         st->usb_version = kb->usb_version;
-        st->usb_version_valid = kb->usb_version != 0xffffffffu;
+        st->usb_version_valid = 1;
     }
     if (!dead && kb_query(kb, AS_K_GET_REV, NULL, 0, out, &dead) == 0) {
         st->revision = (out[2] << 8) | out[1];

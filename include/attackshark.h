@@ -25,7 +25,6 @@ struct as_hid {
     int iface;
     unsigned char descriptor[512];
     size_t descriptor_len;
-    char product[64];
     int fd;
 };
 
@@ -69,20 +68,15 @@ struct as_mouse {
     uint8_t cid;
     uint8_t mid;
     uint8_t type;
-    uint8_t version_major;
-    uint8_t version_minor;
-    uint8_t dongle_version[3];
 };
 
 enum as_mouse_cmd {
     AS_M_CMD_HANDSHAKE = 1,
-    AS_M_CMD_PC_DRIVER_STATUS = 2,
     AS_M_CMD_ONLINE = 3,
     AS_M_CMD_BATTERY = 4,
     AS_M_CMD_WRITE_FLASH = 7,
     AS_M_CMD_READ_FLASH = 8,
     AS_M_CMD_GET_CONFIG = 14,
-    AS_M_CMD_SET_CONFIG = 15,
     AS_M_CMD_VERSION = 18,
     AS_M_CMD_DONGLE_VERSION = 29,
 };
@@ -92,29 +86,18 @@ enum as_mouse_offset {
     AS_M_REPORT_RATE = 0,
     AS_M_MAX_DPI_STAGE = 2,
     AS_M_CURRENT_DPI = 4,
-    AS_M_KEY_OPERATION = 8,
     AS_M_LOD = 10,
     AS_M_DPI_VALUE = 12,
-    AS_M_DPI_COLOR = 44,
     AS_M_DPI_EFFECT_MODE = 76,
     AS_M_DPI_EFFECT_BRIGHTNESS = 78,
     AS_M_DPI_EFFECT_SPEED = 80,
     AS_M_DPI_EFFECT_STATE = 82,
-    AS_M_KEY_FUNCTION = 96,
     AS_M_LIGHT = 160,
     AS_M_DEBOUNCE = 169,
     AS_M_MOTION_SYNC = 171,
     AS_M_SLEEP_TIME = 173,
     AS_M_ANGLE_SNAP = 175,
     AS_M_RIPPLE = 177,
-    AS_M_PERFORMANCE_STATE = 181,
-    AS_M_PERFORMANCE = 183,
-    AS_M_SENSOR_MODE = 185,
-    AS_M_SENSOR_FPS_20K = 225,
-    AS_M_WHEEL_DEBOUNCE = 227,
-    AS_M_DEBOUNCE_RELEASE = 229,
-    AS_M_SENSOR_3955_DPI = 6912,
-    AS_M_END_EEPROM = 6987,
 };
 
 struct as_mouse_state {
@@ -154,7 +137,6 @@ void as_mouse_close(struct as_mouse *m);
  * so callers can explain why settings are unavailable instead of reporting
  * the device as missing. */
 int as_mouse_find_bluetooth(struct as_hid *out);
-int as_mouse_handshake(struct as_mouse *m);
 int as_mouse_read_block(struct as_mouse *m, unsigned addr, uint8_t *buf, unsigned len);
 int as_mouse_write_block(struct as_mouse *m, unsigned addr, const uint8_t *buf, unsigned len);
 int as_mouse_read_state(struct as_mouse *m, struct as_mouse_state *st);
@@ -180,7 +162,6 @@ struct as_keyboard {
     int analog_open;
     int mag_mult;            /* 10, 100 or 200 (0.1 / 0.01 / 0.005 mm) */
     uint32_t usb_version;
-    int usb_version_known;
 };
 
 enum as_kb_cmd {
@@ -192,14 +173,9 @@ enum as_kb_cmd {
     AS_K_SET_LED = 0x07,
     AS_K_SET_SIDELED = 0x08,
     AS_K_SET_LED_POWER = 0x05,
-    AS_K_SET_KBOPTION = 0x09,
-    AS_K_SET_KEYMATRIX = 0x0A,
-    AS_K_SET_FNKEYMATRIX = 0x10,
-    AS_K_SET_SLEEPTIME = 0x11,
     AS_K_SET_MAGNETISM_STREAM = 0x1B,
     AS_K_SET_MAGNETISM_MODE = 0x1D,
     AS_K_SET_MULTI_MAGNETISM = 0x65,
-    AS_K_GET_RF_VERSION = 0x80,
     AS_K_GET_REPORT_RATE = 0x83,
     AS_K_GET_PROFILE = 0x84,
     AS_K_GET_DEBOUNCE = 0x86,
@@ -220,8 +196,6 @@ enum as_kb_mag_param {
     AS_K_MAG_RELEASE = 1,
     AS_K_MAG_RT_PRESS = 2,
     AS_K_MAG_RT_RELEASE = 3,
-    AS_K_MAG_DKS_TOP = 4,
-    AS_K_MAG_MT_TIME = 5,
     AS_K_MAG_DEADZONE = 6,
     AS_K_MAG_OPTION = 7,
     AS_K_MAG_DKS_FLAGS = 8,
@@ -244,11 +218,6 @@ enum as_kb_mag_param {
 #define AS_KB_OPTION_MODE_MASK 0x0f
 
 enum as_kb_key_mode {
-    AS_KB_MODE_NORMAL = 0,
-    AS_KB_MODE_DKS = 2,
-    AS_KB_MODE_MT = 3,
-    AS_KB_MODE_TGL_HOLD = 4,
-    AS_KB_MODE_TGL_DOTS = 5,
     AS_KB_MODE_SNAP = 7,
     AS_KB_MODE_SNAP_NEUTRAL = 8,
     AS_KB_MODE_SNAP_PRIORITY = 9,
@@ -298,26 +267,16 @@ int as_keyboard_find_bluetooth(struct as_hid *out);
 /* Send a command and return the 64-byte answer in out (may be NULL). */
 int as_keyboard_cmd(struct as_keyboard *kb, uint8_t cmd, const uint8_t *args,
                     size_t args_len, int bit8, uint8_t *out, int timeout_ms);
-/* Same, but accepts a response that does not echo the command byte. */
-int as_keyboard_cmd_raw(struct as_keyboard *kb, uint8_t cmd, const uint8_t *args,
-                        size_t args_len, int bit8, uint8_t *out,
-                        int timeout_ms);
 
 int as_keyboard_read_state(struct as_keyboard *kb, struct as_kb_state *st);
 int as_keyboard_open_analog(struct as_keyboard *kb);
 int as_keyboard_enable_stream(struct as_keyboard *kb, int on);
 int as_keyboard_set_light(struct as_keyboard *kb, const struct as_kb_light *l);
-/* Master switch for the whole backlight ("low power mode" in the vendor
- * software): mode 0 only changes the effect, not the power state. */
-int as_keyboard_get_light_power(struct as_keyboard *kb);
-int as_keyboard_get_light_power_zones(struct as_keyboard *kb, int *main_on,
-                                      int *side_on);
 int as_keyboard_set_light_power_zones(struct as_keyboard *kb, int main_on,
                                       int side_on);
 int as_keyboard_set_light_power(struct as_keyboard *kb, int on);
 /* Side (edge) lighting of the R85 HE. Unlike the main light, its speed byte
  * is written as-is instead of being inverted. */
-int as_keyboard_get_sidelight(struct as_keyboard *kb, struct as_kb_light *l);
 int as_keyboard_set_sidelight(struct as_keyboard *kb,
                               const struct as_kb_light *l);
 int as_keyboard_set_report_rate(struct as_keyboard *kb, int hz);
@@ -326,21 +285,20 @@ int as_keyboard_set_debounce(struct as_keyboard *kb, int ms);
 int as_keyboard_set_mag_mode(struct as_keyboard *kb, int mode);
 /* Hall-effect parameters: width (u8/u16) is chosen from the firmware
  * version, exactly like the vendor driver. */
-int as_keyboard_precision(struct as_keyboard *kb);
 int as_keyboard_get_param(struct as_keyboard *kb, int param, int32_t *values,
                           size_t count);
 int as_keyboard_set_param(struct as_keyboard *kb, int param,
                           const int32_t *values, size_t count, int save);
 double as_kb_value_to_mm(struct as_keyboard *kb, int param, int32_t raw);
+/* Magnet mode names in firmware order: comfort, sensitive, gaming, custom. */
+const char *as_kb_mag_mode_name(int mode);
+int as_kb_mag_mode_count(void);
+/* Values the CLI and the GUI show before the board is read. */
+#define AS_KB_DEFAULT_ACTUATION 1.5
+#define AS_KB_DEFAULT_RT 0.2
 int as_keyboard_set_travel(struct as_keyboard *kb, int rapid_trigger,
                            double actuation, double release, double rt_press,
                            double rt_release, double deadzone);
-/* Same settings for one key of the matrix; the other keys keep their values
- * and their mode (Snap Tap, DKS and so on). */
-int as_keyboard_set_key_travel(struct as_keyboard *kb, int key,
-                               int rapid_trigger, double actuation,
-                               double release, double rt_press,
-                               double rt_release, double deadzone);
 /* Applies one travel setting to the keys marked in selected (one byte per
  * matrix position). One bulk pass instead of one command per key. */
 int as_keyboard_set_keys_travel(struct as_keyboard *kb,
@@ -391,7 +349,8 @@ char *as_udev_rule_text(void);
 int as_udev_rules_installed(void);
 /* Writes the rules file (needs root), then reloads and re-triggers udev so the
  * nodes that are already plugged in gain their ACLs without a replug. Returns
- * 0 on success, a negative errno otherwise with a description in err. */
+ * 0 on success, a negative errno otherwise with a description in err, which
+ * may be NULL when the caller only needs the error code. */
 int as_udev_install(char *err, size_t errlen);
 /* 1 when this process may install the rules itself (running as root). */
 int as_udev_can_install(void);

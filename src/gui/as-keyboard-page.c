@@ -20,12 +20,6 @@ typedef struct {
     AdwComboRow *row_rate_combo;
     AdwSpinRow *row_debounce_spin;
     AdwComboRow *row_mag_combo;
-    AdwSpinRow *row_actuation;
-    AdwSpinRow *row_release;
-    AdwSpinRow *row_rt_press;
-    AdwSpinRow *row_rt_release;
-    AdwSpinRow *row_deadzone;
-    AdwSwitchRow *sw_rapid_trigger;
     AdwSwitchRow *sw_light;
     AdwComboRow *row_light_mode;
     AdwSpinRow *row_bright;
@@ -101,34 +95,9 @@ static void apply_mag_mode(AdwComboRow *row, GParamSpec *pspec, gpointer data)
     AsOpRequest req = { .op = AS_OP_KB_MAG_MODE, .value = (int)selected };
 
     (void)pspec;
-    if (!p->page.updating && selected < (guint)as_ui_mag_mode_count()) {
+    if (!p->page.updating && selected < (guint)as_kb_mag_mode_count()) {
         as_store_apply(p->page.store, p->page.path, &req);
     }
-}
-
-static void apply_travel(AsKeyboardPage *p)
-{
-    AsOpRequest req = {
-        .op = AS_OP_KB_TRAVEL,
-        .rapid_trigger = adw_switch_row_get_active(p->sw_rapid_trigger),
-        .actuation = adw_spin_row_get_value(p->row_actuation),
-        .release = adw_spin_row_get_value(p->row_release),
-        .rt_press = adw_spin_row_get_value(p->row_rt_press),
-        .rt_release = adw_spin_row_get_value(p->row_rt_release),
-        .deadzone = adw_spin_row_get_value(p->row_deadzone),
-    };
-
-    if (!p->page.updating) {
-        as_page_queue(&p->page, &req);
-    }
-}
-
-static void on_travel_control(GtkWidget *widget, GParamSpec *pspec,
-                              gpointer data)
-{
-    (void)widget;
-    (void)pspec;
-    apply_travel(data);
 }
 
 /* ------------------------------ snap tap -------------------------------- */
@@ -158,21 +127,11 @@ static gint key_rank_cmp(gconstpointer a, gconstpointer b)
     return key_rank(*(const int *)a) - key_rank(*(const int *)b);
 }
 
-static guint32 key_signature(const AsDevice *dev)
-{
-    guint32 h = dev->key_code_valid ? 1u : 2u;
-
-    for (int i = 0; i < AS_KB_KEY_MAX; i++) {
-        h = h * 31u + dev->key_code[i];
-    }
-    return h;
-}
-
 /* Builds the key lists once per matrix. The page holds only the keys, so the
  * layout dialog and the Snap Tap pickers share one definition of order. */
 static void rebuild_key_lists(AsKeyboardPage *p, AsDevice *dev)
 {
-    guint32 sig = key_signature(dev);
+    guint32 sig = as_ui_device_signature(dev);
     int count = 0;
 
     if (sig == p->key_signature) {
@@ -328,15 +287,6 @@ static void update_page(AsKeyboardPage *p)
     }
     if (dev->mag_mode >= 0) {
         as_ui_combo_set(p->row_mag_combo, &p->page.updating, dev->mag_mode);
-    }
-    if (dev->actuation > 0.0) {
-        as_ui_spin_set(p->row_actuation, &p->page.updating, dev->actuation);
-        as_ui_spin_set(p->row_release, &p->page.updating, dev->release);
-        as_ui_spin_set(p->row_rt_press, &p->page.updating, dev->rt_press);
-        as_ui_spin_set(p->row_rt_release, &p->page.updating, dev->rt_release);
-        as_ui_spin_set(p->row_deadzone, &p->page.updating, dev->deadzone);
-        as_ui_switch_set(p->sw_rapid_trigger, &p->page.updating,
-                         dev->rapid_trigger);
     }
     as_ui_combo_set(p->row_rate_combo, &p->page.updating,
                     as_ui_rate_to_index(dev->rate));
@@ -555,8 +505,8 @@ static AdwPreferencesGroup *build_settings(AsKeyboardPage *p)
     AdwPreferencesGroup *group = as_ui_group("Настройки", NULL);
     GtkStringList *mag = gtk_string_list_new(NULL);
 
-    for (int i = 0; i < as_ui_mag_mode_count(); i++) {
-        gtk_string_list_append(mag, as_ui_mag_mode_name(i));
+    for (int i = 0; i < as_kb_mag_mode_count(); i++) {
+        gtk_string_list_append(mag, as_kb_mag_mode_name(i));
     }
 
     p->row_rate_combo = as_ui_combo("Частота опроса",
@@ -577,39 +527,12 @@ static AdwPreferencesGroup *build_settings(AsKeyboardPage *p)
     return group;
 }
 
-static AdwPreferencesGroup *build_travel(AsKeyboardPage *p)
-{
-    AdwPreferencesGroup *group = as_ui_group(
-        "Срабатывание клавиш", "Настройки применяются ко всем клавишам.");
-    AdwSpinRow **rows[] = { &p->row_actuation, &p->row_release,
-                            &p->row_rt_press, &p->row_rt_release,
-                            &p->row_deadzone };
-    const char *titles[] = { "Точка срабатывания", "Точка отпускания",
-                            "Rapid Trigger: нажатие", "Rapid Trigger: отпускание",
-                            "Мёртвая зона" };
-
-    for (size_t i = 0; i < G_N_ELEMENTS(rows); i++) {
-        *rows[i] = as_ui_spin(titles[i], i == 4 ? 0.0 : 0.1,
-                              i == 4 ? 1.0 : 4.0, 0.1, "мм");
-        adw_spin_row_set_digits(*rows[i], 2);
-        adw_spin_row_set_value(*rows[i], i == 4 ? 0.0 : i < 2 ? 1.5 : 0.2);
-        g_signal_connect(*rows[i], "notify::value",
-                         G_CALLBACK(on_travel_control), p);
-        adw_preferences_group_add(group, GTK_WIDGET(*rows[i]));
-    }
-    p->sw_rapid_trigger = as_ui_switch_row("Rapid Trigger", NULL);
-    g_signal_connect(p->sw_rapid_trigger, "notify::active",
-                     G_CALLBACK(on_travel_control), p);
-    adw_preferences_group_add(group, GTK_WIDGET(p->sw_rapid_trigger));
-    return group;
-}
-
 static AdwPreferencesGroup *build_key_menu(AsKeyboardPage *p)
 {
     AdwPreferencesGroup *group = as_ui_group(
-        "Срабатывание клавиш",
-        "Ход срабатывания, отпускания, Rapid Trigger и Snap Tap задаются "
-        "для каждой клавиши отдельно.");
+        "Ход клавиш",
+        "Точка срабатывания, отпускания, Rapid Trigger, мёртвая зона и Snap "
+        "Tap задаются для выбранных клавиш на раскладке.");
     AdwActionRow *row = as_ui_value_row("Настройка клавиш");
     GtkWidget *button = gtk_button_new_with_label("Открыть…");
 
@@ -731,10 +654,12 @@ GtkWidget *as_keyboard_page_new(AsStore *store, const char *path)
     GtkWidget *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
     GtkStringList *modes;
 
+    /* -1 means "not picked yet"; 0 is a real matrix position. */
+    p->snap_key1 = -1;
+    p->snap_key2 = -1;
     as_page_attach(&p->page, box, prefs, store, path);
     adw_preferences_page_add(prefs, build_status(p));
     adw_preferences_page_add(prefs, build_settings(p));
-    adw_preferences_page_add(prefs, build_travel(p));
     adw_preferences_page_add(prefs, build_key_menu(p));
     adw_preferences_page_add(prefs, build_snap(p));
     adw_preferences_page_add(prefs, build_light(p));

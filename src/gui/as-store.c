@@ -249,12 +249,6 @@ static void fill_keyboard(Handle *h, AsDevice *dev)
                                   AS_KB_KEY_MAX) == 0 &&
             as_keyboard_get_param(&h->kb, AS_K_MAG_OPTION, opt,
                                   AS_KB_KEY_MAX) == 0) {
-            dev->actuation = as_kb_value_to_mm(&h->kb, AS_K_MAG_ACTUATION, act[0]);
-            dev->release = as_kb_value_to_mm(&h->kb, AS_K_MAG_RELEASE, rel[0]);
-            dev->rt_press = as_kb_value_to_mm(&h->kb, AS_K_MAG_RT_PRESS, rtp[0]);
-            dev->rt_release = as_kb_value_to_mm(&h->kb, AS_K_MAG_RT_RELEASE, rtr[0]);
-            dev->deadzone = as_kb_value_to_mm(&h->kb, AS_K_MAG_DEADZONE, dz[0]);
-            dev->rapid_trigger = (opt[0] & AS_KB_OPTION_RT) != 0;
             for (int i = 0; i < AS_KB_KEY_MAX; i++) {
                 dev->key_option[i] = (uint8_t)opt[i];
                 dev->key_actuation[i] =
@@ -441,13 +435,19 @@ static void refresh_job_done(gpointer data, GError *error, gpointer user_data)
                       error->message);
     }
     g_signal_emit(self, signals[SIGNAL_CHANGED], 0);
+}
 
-    /* Values can be clamped by the firmware (DPI steps, for example), so the
-     * optimistic snapshot is confirmed against the hardware once the user
-     * stops fiddling with the controls. */
-    if (!self->settle_id) {
-        self->settle_id = g_timeout_add_seconds(2, settle_cb, self);
+/* Values can be clamped or rounded by the firmware, so a write is confirmed
+ * against the hardware once, a couple of seconds after the user stopped
+ * fiddling with the controls. Only a write schedules this: a scan that
+ * rescheduled itself would keep the whole device busy forever and would push
+ * the device's old values back into the widgets between writes. */
+static void schedule_settle(AsStore *self)
+{
+    if (self->settle_id) {
+        g_source_remove(self->settle_id);
     }
+    self->settle_id = g_timeout_add_seconds(2, settle_cb, self);
 }
 
 /* ---------------------------- analog stream ---------------------------- */
@@ -626,8 +626,6 @@ static int apply_mouse(struct as_mouse *mouse, const AsOpRequest *req)
         return as_mouse_set_u8(mouse, AS_M_ANGLE_SNAP, req->value ? 1 : 0);
     case AS_OP_MOUSE_RIPPLE:
         return as_mouse_set_u8(mouse, AS_M_RIPPLE, req->value ? 1 : 0);
-    case AS_OP_MOUSE_SLEEP:
-        return as_mouse_set_u8(mouse, AS_M_SLEEP_TIME, (uint8_t)req->value);
     case AS_OP_MOUSE_LIGHT:
         return as_mouse_set_light(mouse, (uint8_t)req->light_mode, req->rgb[0],
                                   req->rgb[1], req->rgb[2],
@@ -646,7 +644,6 @@ static void request_light(const AsOpRequest *req, struct as_kb_light *light)
     light->mode = (uint8_t)req->light_mode;
     light->speed = req->light_speed;
     light->brightness = req->light_brightness;
-    light->option = req->light_option;
     light->dazzle = req->light_dazzle;
     light->r = req->rgb[0];
     light->g = req->rgb[1];
@@ -666,15 +663,6 @@ static int apply_keyboard(struct as_keyboard *kb, const AsOpRequest *req)
         return as_keyboard_set_debounce(kb, req->value);
     case AS_OP_KB_MAG_MODE:
         return as_keyboard_set_mag_mode(kb, req->value);
-    case AS_OP_KB_TRAVEL:
-        return as_keyboard_set_travel(kb, req->rapid_trigger, req->actuation,
-                                      req->release, req->rt_press,
-                                      req->rt_release, req->deadzone);
-    case AS_OP_KB_KEY_TRAVEL:
-        return as_keyboard_set_key_travel(kb, req->index, req->rapid_trigger,
-                                          req->actuation, req->release,
-                                          req->rt_press, req->rt_release,
-                                          req->deadzone);
     case AS_OP_KB_KEYS_TRAVEL:
         return as_keyboard_set_keys_travel(kb, req->keys, req->rapid_trigger,
                                            req->actuation, req->release,
@@ -774,7 +762,6 @@ static void apply_optimistic(AsDevice *dev, const AsOpRequest *req)
     case AS_OP_KB_LIGHT:
         dev->light_valid = 1;
         dev->light_mode = req->light_mode;
-        dev->light_mode = req->light_mode;
         dev->light_speed = req->light_speed;
         dev->light_brightness = req->light_brightness;
         dev->light_dazzle = req->light_dazzle;
@@ -800,29 +787,6 @@ static void apply_optimistic(AsDevice *dev, const AsOpRequest *req)
         break;
     case AS_OP_KB_MAG_MODE:
         dev->mag_mode = req->value;
-        break;
-    case AS_OP_KB_TRAVEL:
-        dev->rapid_trigger = req->rapid_trigger;
-        dev->actuation = req->actuation;
-        dev->release = req->release;
-        dev->rt_press = req->rt_press;
-        dev->rt_release = req->rt_release;
-        dev->deadzone = req->deadzone;
-        for (int i = 0; i < AS_KB_KEY_MAX; i++) {
-            dev->key_actuation[i] = req->actuation;
-            dev->key_release[i] = req->release;
-            dev->key_rt_press[i] = req->rt_press;
-            dev->key_rt_release[i] = req->rt_release;
-            dev->key_deadzone[i] = req->deadzone;
-            dev->key_option[i] =
-                (uint8_t)((dev->key_option[i] & ~AS_KB_OPTION_RT) |
-                          (req->rapid_trigger ? AS_KB_OPTION_RT : 0));
-        }
-        break;
-    case AS_OP_KB_KEY_TRAVEL:
-        if (req->index >= 0 && req->index < AS_KB_KEY_MAX) {
-            snapshot_key_travel(dev, req->index, req);
-        }
         break;
     case AS_OP_KB_KEYS_TRAVEL:
         for (int i = 0; i < AS_KB_KEY_MAX; i++) {
@@ -901,6 +865,7 @@ static void apply_job_done(gpointer data, GError *error, gpointer user_data)
         apply_optimistic(dev, &job->req);
     }
     g_signal_emit(job->store, signals[SIGNAL_CHANGED], 0);
+    schedule_settle(job->store);
 }
 
 /* -------------------------------- API --------------------------------- */

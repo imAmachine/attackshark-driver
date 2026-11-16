@@ -27,4 +27,17 @@ int as_hid_find_first(int (*match)(const struct as_hid *), struct as_hid *out);
 int as_hid_open_first(int (*match)(const struct as_hid *), unsigned vid,
                       struct as_hid *out);
 
+/* Keyboard and mouse helpers used across the library sources only. */
+int as_keyboard_cmd_raw(struct as_keyboard *kb, uint8_t cmd, const uint8_t *args,
+                        size_t args_len, int bit8, uint8_t *out,
+                        int timeout_ms);
+int as_keyboard_precision(struct as_keyboard *kb);
+/* Master switch for the whole backlight ("low power mode" in the vendor
+ * software): mode 0 only changes the effect, not the power state. */
+int as_keyboard_get_light_power(struct as_keyboard *kb);
+int as_keyboard_get_light_power_zones(struct as_keyboard *kb, int *main_on,
+                                      int *side_on);
+int as_keyboard_get_sidelight(struct as_keyboard *kb, struct as_kb_light *l);
+int as_mouse_handshake(struct as_mouse *m);
+
 #endif

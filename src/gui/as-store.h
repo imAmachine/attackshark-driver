@@ -61,12 +61,6 @@ typedef struct {
     int revision_valid;
     int revision;
     int mag_mode;
-    int rapid_trigger;
-    double actuation;
-    double release;
-    double rt_press;
-    double rt_release;
-    double deadzone;
     /* Every matrix position, so the page can configure one key at a time. */
     int key_code_valid;
     uint32_t key_code[AS_KB_KEY_MAX];
@@ -102,14 +96,11 @@ enum {
     AS_OP_MOUSE_MOTION_SYNC,
     AS_OP_MOUSE_ANGLE_SNAP,
     AS_OP_MOUSE_RIPPLE,
-    AS_OP_MOUSE_SLEEP,
     AS_OP_MOUSE_LIGHT,
     AS_OP_KB_RATE,
     AS_OP_KB_PROFILE,
     AS_OP_KB_DEBOUNCE,
     AS_OP_KB_MAG_MODE,
-    AS_OP_KB_TRAVEL,
-    AS_OP_KB_KEY_TRAVEL,
     AS_OP_KB_KEYS_TRAVEL,
     AS_OP_KB_SNAP,
     AS_OP_KB_LIGHT,
@@ -126,7 +117,6 @@ typedef struct {
     int light_speed;
     int light_brightness;
     int light_on;
-    int light_option;
     int light_dazzle;
     double actuation;
     double release;

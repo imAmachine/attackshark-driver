@@ -3,7 +3,6 @@
 
 #include <glib/gstdio.h>
 #include <stdio.h>
-#include <string.h>
 
 #include "as-store.h"
 #include "as-ui.h"
