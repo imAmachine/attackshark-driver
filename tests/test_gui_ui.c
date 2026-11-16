@@ -47,6 +47,35 @@ static void test_rt_dirty(void)
     g_assert_true(dialog.edited_while_pending);
 }
 
+static void test_demo_state(void)
+{
+    KeyDialog dialog = { .act = 1.5, .rel = 1.0, .rtp = 0.2,
+                         .rtr = 0.2, .dz = 0.1 };
+
+    demo_update(&dialog, 1.4, FALSE);
+    g_assert_false(dialog.demo_pressed);
+    demo_update(&dialog, 1.6, FALSE);
+    g_assert_true(dialog.demo_pressed);
+    demo_update(&dialog, 1.2, FALSE);
+    g_assert_true(dialog.demo_pressed);
+    demo_update(&dialog, 0.9, FALSE);
+    g_assert_false(dialog.demo_pressed);
+    demo_update(&dialog, 2.0, TRUE);
+    g_assert_true(dialog.demo_pressed);
+    demo_update(&dialog, 1.7, TRUE);
+    g_assert_false(dialog.demo_pressed);
+    demo_update(&dialog, 1.95, TRUE);
+    g_assert_true(dialog.demo_pressed);
+    demo_update(&dialog, 0.05, TRUE);
+    g_assert_false(dialog.demo_pressed);
+    g_assert_false(dialog.demo_tracking);
+    demo_update(&dialog, 0.5, TRUE);
+    g_assert_false(dialog.demo_pressed);
+    dialog.act = 0.0;
+    demo_update(&dialog, 0.0, FALSE);
+    g_assert_false(dialog.demo_pressed);
+}
+
 static gboolean have_display;
 
 static void test_stale_completion(void)
@@ -95,6 +124,16 @@ static void test_dirty_refresh(void)
     }
     g_assert_nonnull(dialog);
     g_assert_cmpfloat(dialog->act, ==, 1.0);
+    g_assert_true(gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(dialog->buttons[0])));
+    adw_combo_row_set_selected(dialog->switch_row, 4);
+    g_assert_cmpfloat(dialog->switch_bottom, ==, 3.5);
+    g_assert_cmpfloat(dialog->act, ==, 1.0);
+    g_assert_false(dialog->edited);
+    dev->key_option[key] = AS_KB_OPTION_RT;
+    refresh_key_styles(dialog);
+    g_assert_true(gtk_widget_has_css_class(dialog->buttons[0], "rt"));
+    g_assert_true(gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(dialog->buttons[0])));
+    dev->key_option[key] = 0;
     adw_switch_row_set_active(dialog->rt, TRUE);
     g_assert_true(dialog->edited);
     dev->key_actuation[key] = 0.5;
@@ -226,6 +265,7 @@ int main(int argc, char **argv)
     g_test_add_func("/gui/dialog/dirty-refresh", test_dirty_refresh);
     g_test_add_func("/gui/keyboard/matrix-only-rebuild", test_key_lists);
     g_test_add_func("/gui/dialog/rt-dirty", test_rt_dirty);
+    g_test_add_func("/gui/dialog/demo-state", test_demo_state);
     g_test_add_func("/gui/queue/indexed-coalescing", test_queue);
     g_test_add_func("/gui/store/failed-completion", test_completion);
     return g_test_run();

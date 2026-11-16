@@ -117,6 +117,9 @@ typedef struct {
     int demo_key;           /* matrix position the demo follows */
     double switch_bottom;   /* travel of the selected switch type, mm */
     gboolean demo_active;
+    gboolean demo_pressed;
+    gboolean demo_tracking;
+    double demo_extreme;
     gboolean edited;        /* the user changed a slider: keep those values */
     guint refresh_id;
     guint32 signature;
@@ -538,31 +541,17 @@ static void on_apply(GtkButton *button, gpointer data)
     }
 }
 
-/* Every switch gets the same starting point the vendor uses in its "gaming"
- * mode: 1.5 mm trigger, 0.2 mm Rapid Trigger offsets. The type only decides
- * which switch names are offered, since the firmware stores one profile for
- * all keys. */
 static void on_switch_type(AdwComboRow *row, GParamSpec *pspec, gpointer data)
 {
     KeyDialog *d = data;
     guint selected = adw_combo_row_get_selected(row);
-    gboolean previous;
 
     (void)pspec;
     if (d->updating || selected >= G_N_ELEMENTS(switch_presets)) {
         return;
     }
-    previous = d->updating;
-    d->updating = TRUE;
     d->switch_bottom = switch_presets[selected].bottom_out;
-    as_ui_slider_set(d->actuation, AS_KB_DEFAULT_ACTUATION);
-    as_ui_slider_set(d->release, AS_KB_DEFAULT_ACTUATION);
-    as_ui_slider_set(d->rt_press, AS_KB_DEFAULT_RT);
-    as_ui_slider_set(d->rt_release, AS_KB_DEFAULT_RT);
-    as_ui_switch_set(d->rt, &d->updating, TRUE);
-    d->updating = previous;
-    d->edited = TRUE;
-    d->edited_while_pending = TRUE;
+    gtk_widget_queue_draw(d->demo_area);
 }
 
 static void on_close(GtkButton *button, gpointer data)
@@ -616,6 +605,12 @@ static void on_demo_toggle(AdwSwitchRow *row, GParamSpec *pspec, gpointer data)
         as_store_analog_stop(d->store);
     }
     d->demo_active = active;
+    d->demo_pressed = FALSE;
+    d->demo_tracking = FALSE;
+    d->demo_extreme = 0.0;
+    for (size_t i = 0; i < G_N_ELEMENTS(keyboxes); i++) {
+        set_class(d->buttons[i], "pressed", FALSE);
+    }
     gtk_widget_set_visible(d->demo_area, active);
     gtk_widget_queue_draw(d->demo_area);
 }
@@ -683,12 +678,6 @@ static gboolean on_test_pressed(GtkEventControllerKey *controller,
     (void)state;
     if (button) {
         gtk_widget_add_css_class(button, "pressed");
-    }
-    for (size_t i = 0; i < G_N_ELEMENTS(keyboxes); i++) {
-        if (keyboxes[i].code == code) {
-            d->demo_key = keyboxes[i].pos;
-            break;
-        }
     }
     gtk_widget_queue_draw(d->demo_area);
     return FALSE;
@@ -778,24 +767,89 @@ static void demo_draw(GtkDrawingArea *area, cairo_t *cr, int width, int height,
     cairo_move_to(cr, housing_x + housing_w + 24, top + 50);
     cairo_show_text(cr, buf);
 
-    if (depth >= act) {
-        snprintf(buf, sizeof(buf), "зона: сработала");
-    } else if (depth <= rel) {
-        snprintf(buf, sizeof(buf), "зона: отпущена");
-    } else {
-        snprintf(buf, sizeof(buf), "зона: до срабатывания");
-    }
+    snprintf(buf, sizeof(buf), "состояние: %s",
+             d->demo_pressed ? "нажата" : "отпущена");
     cairo_set_source_rgb(cr, 0.95, 0.95, 0.95);
     cairo_move_to(cr, housing_x + housing_w + 24, top + 70);
     cairo_show_text(cr, buf);
+    for (size_t i = 0; i < G_N_ELEMENTS(keyboxes); i++) {
+        if (keyboxes[i].pos == d->demo_key) {
+            char name[32];
+
+            snprintf(buf, sizeof(buf), "Клавиша: %s%s",
+                     short_key_name(keyboxes[i].code, name, sizeof(name)),
+                     adw_switch_row_get_active(d->rt) ? " (Rapid Trigger)" : "");
+            break;
+        }
+    }
+    cairo_move_to(cr, housing_x + housing_w + 24, top + 90);
+    cairo_show_text(cr, buf);
+}
+
+static void demo_update(KeyDialog *d, double depth, gboolean rapid)
+{
+    if (depth <= 0.0 || (rapid && depth <= d->dz)) {
+        d->demo_pressed = FALSE;
+        d->demo_tracking = FALSE;
+        d->demo_extreme = depth;
+        return;
+    }
+    if (!rapid) {
+        if (!d->demo_pressed && depth >= d->act) {
+            d->demo_pressed = TRUE;
+        } else if (d->demo_pressed && depth <= d->rel) {
+            d->demo_pressed = FALSE;
+        }
+        return;
+    }
+    if (!d->demo_tracking) {
+        if (depth >= d->act) {
+            d->demo_tracking = TRUE;
+            d->demo_pressed = TRUE;
+            d->demo_extreme = depth;
+        }
+    } else if (d->demo_pressed) {
+        d->demo_extreme = MAX(d->demo_extreme, depth);
+        if (depth < d->demo_extreme &&
+            d->demo_extreme - depth >= d->rtr) {
+            d->demo_pressed = FALSE;
+            d->demo_extreme = depth;
+        }
+    } else {
+        d->demo_extreme = MIN(d->demo_extreme, depth);
+        if (depth > d->demo_extreme && depth - d->demo_extreme >= d->rtp) {
+            d->demo_pressed = TRUE;
+            d->demo_extreme = depth;
+        }
+    }
 }
 
 static void on_analog(AsStore *store, gpointer data)
 {
-    GtkWidget *area = data;
+    KeyDialog *d = data;
+    int key = d->demo_key;
+    int deepest = as_store_travel(store, d->path, key);
 
-    (void)store;
-    gtk_widget_queue_draw(area);
+    if (!d->demo_active) {
+        return;
+    }
+    for (size_t i = 0; i < G_N_ELEMENTS(keyboxes); i++) {
+        int depth = as_store_travel(store, d->path, keyboxes[i].pos);
+
+        if (depth > deepest) {
+            deepest = depth;
+            key = keyboxes[i].pos;
+        }
+        set_class(d->buttons[i], "pressed", depth > 0);
+    }
+    if (key != d->demo_key) {
+        d->demo_pressed = FALSE;
+        d->demo_tracking = FALSE;
+        d->demo_extreme = 0.0;
+        d->demo_key = key;
+    }
+    demo_update(d, deepest / 1000.0, adw_switch_row_get_active(d->rt));
+    gtk_widget_queue_draw(d->demo_area);
 }
 
 static void dialog_free(gpointer data)
@@ -853,7 +907,9 @@ static void load_css(void)
         "  box-shadow: inset 0 0 0 2px rgba(53,132,228,0.55); }"
         "button.keycap.snap { border: 2px solid #e66100; }"
         "button.keycap.pressed { background-color: rgba(53,132,228,0.75);"
-        "  color: #ffffff; }");
+        "  color: #ffffff; }"
+        "button.keycap:checked { outline: 3px solid @accent_color;"
+        "  outline-offset: 1px; }");
     gtk_style_context_add_provider_for_display(gdk_display_get_default(),
                                                GTK_STYLE_PROVIDER(provider),
                                                GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
@@ -867,7 +923,7 @@ void as_key_dialog_open(GtkWindow *parent, AsStore *store, const char *path)
     GtkWidget *outer = gtk_box_new(GTK_ORIENTATION_VERTICAL, 12);
     GtkWidget *description = gtk_label_new(
         "Нажмите клавиши, чтобы выбрать их, затем задайте ход. Настройка "
-        "применится только к выбранным клавишам.");
+        "применится только к выбранным клавишам. Выбор отмечен обводкой.");
     GtkWidget *fixed = gtk_fixed_new();
     GtkWidget *select = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
     GtkWidget *actions = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
@@ -969,12 +1025,12 @@ void as_key_dialog_open(GtkWindow *parent, AsStore *store, const char *path)
                      switch_presets[i].name, switch_presets[i].bottom_out);
             gtk_string_list_append(types, label);
         }
-        d->switch_row = as_ui_combo("Тип свитчей", G_LIST_MODEL(types));
+        d->switch_row = as_ui_combo("Свитч для масштаба демо", G_LIST_MODEL(types));
         d->switch_bottom = switch_presets[0].bottom_out;
         gtk_widget_set_tooltip_text(
             GTK_WIDGET(d->switch_row),
-            "Ход свитча нужен только для демо-режима; прошивка хранит "
-            "один профиль на все клавиши");
+            "Только масштаб демо, не меняет настройки клавиш "
+            "и не записывает тип свитча в клавиатуру");
         g_signal_connect(d->switch_row, "notify::selected",
                          G_CALLBACK(on_switch_type), d);
         adw_preferences_group_add(group, GTK_WIDGET(d->switch_row));
@@ -1012,8 +1068,7 @@ void as_key_dialog_open(GtkWindow *parent, AsStore *store, const char *path)
         gtk_widget_set_visible(d->demo_area, FALSE);
         gtk_drawing_area_set_draw_func(GTK_DRAWING_AREA(d->demo_area),
                                        demo_draw, d, NULL);
-        g_signal_connect_object(store, "analog", G_CALLBACK(on_analog),
-                                d->demo_area, 0);
+        g_signal_connect(store, "analog", G_CALLBACK(on_analog), d);
         adw_preferences_group_add(demo, d->demo_area);
         {
             GtkWidget *zone_legend = gtk_label_new(NULL);
