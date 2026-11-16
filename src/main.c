@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 static int json_mode;
@@ -37,14 +38,39 @@ static const char *json_escape(const char *in, char *buf, size_t len)
 {
     size_t o = 0;
 
-    for (; *in && o + 2 < len; in++) {
-        if (*in == '\\' || *in == '"') {
-            buf[o++] = '\\';
+    if (!len) {
+        return buf;
+    }
+    for (; *in; in++) {
+        unsigned char ch = (unsigned char)*in;
+        size_t need = ch < 0x20 ? 6 : (ch == '\\' || ch == '"') ? 2 : 1;
+
+        if (need >= len - o) {
+            break;
         }
-        buf[o++] = *in;
+        if (ch < 0x20) {
+            snprintf(buf + o, len - o, "\\u%04x", ch);
+            o += 6;
+        } else {
+            if (need == 2) {
+                buf[o++] = '\\';
+            }
+            buf[o++] = (char)ch;
+        }
     }
     buf[o] = 0;
     return buf;
+}
+
+static void json_file_result(const char *file, size_t bytes)
+{
+    printf("{\"file\":\"");
+    for (; *file; file++) {
+        char input[2] = { *file, 0 }, escaped[7];
+
+        fputs(json_escape(input, escaped, sizeof(escaped)), stdout);
+    }
+    printf("\",\"bytes\":%zu}\n", bytes);
 }
 
 static int parse_bool(const char *s, int *value)
@@ -661,21 +687,14 @@ static int cmd_mouse(int argc, char **argv)
         fclose(f);
         if (backup) {
             if (json_mode) {
-                char escaped[1024];
-
-                printf("{\"file\":\"%s\",\"bytes\":%zu}\n",
-                       json_escape(file, escaped, sizeof(escaped)),
-                       sizeof(buf));
+                json_file_result(file, sizeof(buf));
             } else {
                 printf("saved %zu bytes to %s\n", sizeof(buf), file);
             }
         } else if ((ret = as_mouse_write_block(&m, 0, buf, sizeof(buf))) < 0) {
             report(ret);
         } else if (json_mode) {
-            char escaped[1024];
-
-            printf("{\"file\":\"%s\",\"bytes\":%zu}\n",
-                   json_escape(file, escaped, sizeof(escaped)), sizeof(buf));
+            json_file_result(file, sizeof(buf));
         } else {
             printf("restored %zu bytes from %s\n", sizeof(buf), file);
         }
@@ -887,24 +906,33 @@ static void on_sigint(int sig)
     stop_stream = 1;
 }
 
-static void stream_analog(struct as_keyboard *kb, int seconds)
+static long long stream_now_ms(void)
 {
-    struct sigaction sa = { 0 };
+    struct timespec now;
+
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    return (long long)now.tv_sec * 1000 + now.tv_nsec / 1000000;
+}
+
+static int stream_analog(struct as_keyboard *kb, int seconds)
+{
+    struct sigaction sa = { 0 }, old_int, old_term;
     unsigned char buf[64];
-    long deadline = seconds > 0 ? (long)seconds * 1000 : 0;
+    long long deadline = seconds > 0 ? stream_now_ms() + (long long)seconds * 1000 : 0;
+    int result, cleanup;
 
+    stop_stream = 0;
     sa.sa_handler = on_sigint;
-    sigaction(SIGINT, &sa, NULL);
-    sigaction(SIGTERM, &sa, NULL);
+    sigaction(SIGINT, &sa, &old_int);
+    sigaction(SIGTERM, &sa, &old_term);
 
-    if (as_keyboard_enable_stream(kb, 1) < 0) {
-        fprintf(stderr, "attackshark: cannot enable the analog stream\n");
-        return;
+    result = as_keyboard_enable_stream(kb, 1);
+    if (result < 0) {
+        goto restore_signals;
     }
-    if (as_keyboard_open_analog(kb) < 0) {
-        fprintf(stderr, "attackshark: analog interface not found\n");
-        as_keyboard_enable_stream(kb, 0);
-        return;
+    result = as_keyboard_open_analog(kb);
+    if (result < 0) {
+        goto disable_stream;
     }
 
     if (!json_mode) {
@@ -912,15 +940,20 @@ static void stream_analog(struct as_keyboard *kb, int seconds)
         fflush(stdout);
     }
     while (!stop_stream) {
-        int ret = as_hid_read(&kb->analog, buf, sizeof(buf), 500);
+        long long left = deadline ? deadline - stream_now_ms() : 500;
+        int ret;
 
+        if (left <= 0) {
+            break;
+        }
+        ret = as_hid_read(&kb->analog, buf, sizeof(buf), left < 500 ? (int)left : 500);
         if (ret == -ETIMEDOUT) {
-            if (deadline && (deadline -= 500) <= 0) {
-                break;
-            }
             continue;
         }
         if (ret < 0) {
+            if (!stop_stream) {
+                result = ret;
+            }
             break;
         }
         if (ret < 2 || buf[0] != 0x05) {
@@ -942,7 +975,15 @@ static void stream_analog(struct as_keyboard *kb, int seconds)
             }
         }
     }
-    as_keyboard_enable_stream(kb, 0);
+disable_stream:
+    cleanup = as_keyboard_enable_stream(kb, 0);
+    if (result >= 0 && cleanup < 0) {
+        result = cleanup;
+    }
+restore_signals:
+    sigaction(SIGINT, &old_int, NULL);
+    sigaction(SIGTERM, &old_term, NULL);
+    return result < 0 ? result : 0;
 }
 
 /* Clamped key count for the raw Hall-effect table commands. */
@@ -1215,14 +1256,29 @@ static int cmd_keyboard(int argc, char **argv)
                 as_keyboard_close(&kb);
                 return 1;
             }
+            int uniform = 1;
+
+            for (int key = 1; key < AS_KB_KEY_MAX; key++) {
+                if (act_v[key] != act_v[0] || rel_v[key] != rel_v[0] ||
+                    dz_v[key] != dz_v[0] ||
+                    (opt_v[key] & AS_KB_OPTION_RT) != (opt_v[0] & AS_KB_OPTION_RT)) {
+                    uniform = 0;
+                    break;
+                }
+            }
             if (json_mode) {
-                printf("{\"actuation\":%.2f,\"release\":%.2f,"
+                printf("{\"slot\":0,\"uniform\":%s,\"actuation\":%.2f,\"release\":%.2f,"
                        "\"deadzone\":%.2f,\"rapid_trigger\":%s}\n",
+                       jbool(uniform),
                        as_kb_value_to_mm(&kb, AS_K_MAG_ACTUATION, act_v[0]),
                        as_kb_value_to_mm(&kb, AS_K_MAG_RELEASE, rel_v[0]),
                        as_kb_value_to_mm(&kb, AS_K_MAG_DEADZONE, dz_v[0]),
                        jbool(opt_v[0] & 0x80));
             } else {
+                printf("slot        0\n");
+                if (!uniform) {
+                    printf("settings differ between slots; use keyboard keys for per-key values\n");
+                }
                 printf("actuation   %.2f mm\n",
                        as_kb_value_to_mm(&kb, AS_K_MAG_ACTUATION, act_v[0]));
                 printf("release     %.2f mm\n",
@@ -1521,7 +1577,10 @@ static int cmd_keyboard(int argc, char **argv)
     } else if (!strcmp(sub, "stream")) {
         const char *seconds = opt_value(argc, argv, "--seconds");
 
-        stream_analog(&kb, seconds ? atoi(seconds) : 0);
+        ret = stream_analog(&kb, seconds ? atoi(seconds) : 0);
+        if (ret < 0) {
+            report(ret);
+        }
     } else if (!strcmp(sub, "reset")) {
         ret = as_keyboard_cmd(&kb, AS_K_RESET, NULL, 0, 0, NULL, 0);
         if (ret == 0) {
@@ -1707,10 +1766,16 @@ int main(int argc, char **argv)
 {
     int n = 1;
 
+    int positional = 0;
+
     for (int i = 1; i < argc; i++) {
-        if (!strcmp(argv[i], "--json")) {
+        if (!positional && !strcmp(argv[i], "--")) {
+            positional = 1;
+            continue;
+        }
+        if (!positional && !strcmp(argv[i], "--json")) {
             json_mode = 1;
-        } else if (!strcmp(argv[i], "--optional")) {
+        } else if (!positional && !strcmp(argv[i], "--optional")) {
             optional_mode = 1;
         } else {
             argv[n++] = argv[i];
