@@ -2,6 +2,7 @@
 #include "attackshark.h"
 
 #include <assert.h>
+#include <errno.h>
 #include <string.h>
 #include <math.h>
 #include <stdio.h>
@@ -81,6 +82,22 @@ static void test_travel(void)
     assert(as_kb_deadzone_to_raw(0.3) == 36);
     assert(as_kb_deadzone_to_raw(1.0) == 29);
     printf("travel codec ok\n");
+}
+
+static void test_travel_noop_and_null(void)
+{
+    struct as_keyboard kb;
+    uint8_t selected[AS_KB_KEY_MAX] = { 0 };
+
+    memset(&kb, 0, sizeof(kb));
+    kb.mag_mult = 100;
+    assert(as_keyboard_set_keys_travel(&kb, NULL, 0, 1.0, 1.0,
+                                      1.0, 1.0, 0.3) == -EINVAL);
+    assert(as_keyboard_set_keys_travel(&kb, selected, 0, 1.0, 1.0,
+                                      1.0, 1.0, 0.3) == 0);
+    selected[0] = 1;
+    assert(as_keyboard_set_keys_travel(&kb, selected, 0, NAN, 1.0,
+                                      1.0, 1.0, 0.3) == -ENODATA);
 }
 
 static void test_travel_precision(void)
@@ -172,6 +189,7 @@ int main(void)
     test_dpi();
     test_rates();
     test_travel();
+    test_travel_noop_and_null();
     test_travel_precision();
     test_snap();
     test_analog();

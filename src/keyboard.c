@@ -12,6 +12,8 @@
 #include "internal.h"
 
 #include <errno.h>
+#include <limits.h>
+#include <math.h>
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
@@ -277,15 +279,21 @@ static int param_width(struct as_keyboard *kb, int param)
 static int32_t encode_value(struct as_keyboard *kb, int param, double mm)
 {
     int mult = as_keyboard_precision(kb);
+    double scaled;
 
-    if (mult < 0) {
+    if (!isfinite(mm) || mult < 0) {
         return -1;
     }
     if (mult < 100) {
         return param == AS_K_MAG_DEADZONE ? as_kb_deadzone_to_raw(mm)
                                           : as_kb_mm_to_raw(mm);
     }
-    return (int32_t)(mm * mult + 0.5);
+    scaled = mm * mult;
+    if (!isfinite(scaled) || scaled > (double)INT32_MAX - 0.5 ||
+        scaled < (double)INT32_MIN - 0.5) {
+        return -1;
+    }
+    return (int32_t)(scaled + 0.5);
 }
 
 double as_kb_value_to_mm(struct as_keyboard *kb, int param, int32_t raw)
@@ -749,6 +757,18 @@ static int write_travel(struct as_keyboard *kb, const uint8_t *mask,
     int any = mask == NULL;
     int ret;
 
+    if (mask) {
+        any = 0;
+        for (int i = 0; i < AS_KB_KEY_MAX; i++) {
+            if (mask[i]) {
+                any = 1;
+                break;
+            }
+        }
+        if (!any) {
+            return 0;
+        }
+    }
     if (as_keyboard_get_param(kb, AS_K_MAG_ACTUATION, act, AS_KB_KEY_MAX) ||
         as_keyboard_get_param(kb, AS_K_MAG_RELEASE, rel, AS_KB_KEY_MAX) ||
         as_keyboard_get_param(kb, AS_K_MAG_DEADZONE, dz, AS_KB_KEY_MAX) ||
@@ -798,6 +818,9 @@ static int write_travel(struct as_keyboard *kb, const uint8_t *mask,
     if (!param_matches(kb, AS_K_MAG_ACTUATION, act) ||
         !param_matches(kb, AS_K_MAG_RELEASE, rel) ||
         !param_matches(kb, AS_K_MAG_DEADZONE, dz) ||
+        (rapid_trigger &&
+         (!param_matches(kb, AS_K_MAG_RT_PRESS, rtp) ||
+          !param_matches(kb, AS_K_MAG_RT_RELEASE, rtr))) ||
         !param_matches(kb, AS_K_MAG_OPTION, opt)) {
         return -EIO;
     }
@@ -829,14 +852,27 @@ int as_keyboard_set_keys_travel(struct as_keyboard *kb,
                                 double deadzone)
 {
     int32_t values[5];
-    int ret = encode_travel(kb, actuation, release, rt_press, rt_release,
-                            deadzone, values);
+    int any = 0;
 
-    if (ret < 0) {
-        return ret;
-    }
     if (!selected) {
         return -EINVAL;
+    }
+    for (int i = 0; i < AS_KB_KEY_MAX; i++) {
+        if (selected[i]) {
+            any = 1;
+            break;
+        }
+    }
+    if (!any) {
+        return 0;
+    }
+    {
+        int ret = encode_travel(kb, actuation, release, rt_press, rt_release,
+                                deadzone, values);
+
+        if (ret < 0) {
+            return ret;
+        }
     }
     return write_travel(kb, selected, rapid_trigger, values);
 }
