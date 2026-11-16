@@ -292,6 +292,10 @@ static void update_page(AsKeyboardPage *p)
     if (dev->mag_mode >= 0) {
         as_ui_combo_set(p->row_mag_combo, &p->page.updating, dev->mag_mode);
     }
+    gtk_widget_set_sensitive(GTK_WIDGET(p->row_mag_combo), FALSE);
+    gtk_widget_set_tooltip_text(
+        GTK_WIDGET(p->row_mag_combo),
+        "Эта прошивка всегда возвращает comfort; режимы не подтверждены");
     as_ui_combo_set(p->row_rate_combo, &p->page.updating,
                     as_ui_rate_to_index(dev->rate));
     gtk_widget_set_visible(GTK_WIDGET(p->light_group), dev->light_valid);
@@ -524,7 +528,8 @@ static AdwPreferencesGroup *build_settings(AsKeyboardPage *p)
                      G_CALLBACK(apply_debounce), p);
     adw_preferences_group_add(group, GTK_WIDGET(p->row_debounce_spin));
 
-    p->row_mag_combo = as_ui_combo("Режим магнитов", G_LIST_MODEL(mag));
+    p->row_mag_combo = as_ui_combo("Режим магнитов (только чтение)",
+                                    G_LIST_MODEL(mag));
     g_signal_connect(p->row_mag_combo, "notify::selected",
                      G_CALLBACK(apply_mag_mode), p);
     adw_preferences_group_add(group, GTK_WIDGET(p->row_mag_combo));
