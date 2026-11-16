@@ -10,6 +10,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 /* Attack Shark R11 Ultra over Bluetooth (VID 3554, PID f533). */
 static const unsigned char bt_map[] = {
@@ -89,6 +90,7 @@ static void test_dongle_link(void)
     assert(as_hid_is_mouse(&dev));
     assert(as_hid_has_vendor(&dev));
     assert(strcmp(as_mouse_model_name(dev.pid), "R11 Ultra (2.4 GHz)") == 0);
+    assert(strstr(as_strerror(-EREMOTEIO), "refused") != NULL);
     printf("dongle link ok\n");
 }
 
@@ -250,6 +252,17 @@ static void test_udev_rule_file(void)
     printf("udev rule file matches the driver output\n");
 }
 
+/* The error buffer is optional: callers that only need the code pass NULL. */
+static void test_udev_install_null_err(void)
+{
+    if (geteuid() == 0) {
+        printf("udev install as root, skipped\n");
+        return;
+    }
+    assert(as_udev_install(NULL, 0) == -EPERM);
+    printf("udev install without an error buffer ok\n");
+}
+
 int main(void)
 {
     test_bluetooth_link();
@@ -262,6 +275,7 @@ int main(void)
     test_udev_rule_text();
     test_udev_rule_order();
     test_udev_rule_file();
+    test_udev_install_null_err();
     printf("all tests passed\n");
     return 0;
 }

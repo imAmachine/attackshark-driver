@@ -16,6 +16,12 @@ const char *as_strerror(int err)
     case ETIMEDOUT: return "device did not answer (is it awake / plugged in?)";
     case EPROTO: return "unexpected reply from device";
     case ENODATA: return "device returned no data";
+    case EREMOTEIO:
+        return "the device refused the command: it answered with status 1 "
+               "(understood but not supported)";
+    case EIO:
+        return "the firmware did not keep the value: it reads back differently "
+               "after the write";
     case EINVAL: return "invalid argument";
     case ENOTSUP:
         return "settings are unavailable over Bluetooth: the vendor settings "

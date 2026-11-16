@@ -191,14 +191,19 @@ static int write_rules(const char *text, char *err, size_t errlen)
     int fd, rc;
 
     if (mkdir(RULE_DIR, 0755) != 0 && errno != EEXIST) {
-        snprintf(err, errlen, "cannot create %s: %s", RULE_DIR,
-                 strerror(errno));
+        if (err && errlen) {
+            snprintf(err, errlen, "cannot create %s: %s", RULE_DIR,
+                     strerror(errno));
+        }
         return -errno;
     }
     snprintf(tmp, sizeof(tmp), "%s.tmp", RULE_PATH);
     fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
     if (fd < 0) {
-        snprintf(err, errlen, "cannot write %s: %s", tmp, strerror(errno));
+        if (err && errlen) {
+            snprintf(err, errlen, "cannot write %s: %s", tmp,
+                     strerror(errno));
+        }
         return -errno;
     }
     rc = write_all(fd, text, strlen(text));
@@ -209,7 +214,10 @@ static int write_rules(const char *text, char *err, size_t errlen)
         rc = -errno;
     }
     if (rc < 0) {
-        snprintf(err, errlen, "cannot write %s: %s", tmp, strerror(-rc));
+        if (err && errlen) {
+            snprintf(err, errlen, "cannot write %s: %s", tmp,
+                     strerror(-rc));
+        }
         unlink(tmp);
     }
     return rc;
@@ -245,12 +253,16 @@ int as_udev_install(char *err, size_t errlen)
         err[0] = 0;
     }
     if (!as_udev_can_install()) {
-        snprintf(err, errlen, "%s needs root privileges", RULE_PATH);
+        if (err && errlen) {
+            snprintf(err, errlen, "%s needs root privileges", RULE_PATH);
+        }
         return -EPERM;
     }
     text = as_udev_rule_text();
     if (!text) {
-        snprintf(err, errlen, "out of memory");
+        if (err && errlen) {
+            snprintf(err, errlen, "out of memory");
+        }
         return -ENOMEM;
     }
     rc = write_rules(text, err, errlen);
@@ -272,9 +284,11 @@ int as_udev_install(char *err, size_t errlen)
         return 0;
     }
     if (rc < 0) {
-        snprintf(err, errlen, "the rules file is installed, but \"udevadm "
-                              "control --reload-rules\" failed: %s",
-                 strerror(-rc));
+        if (err && errlen) {
+            snprintf(err, errlen, "the rules file is installed, but \"udevadm "
+                                  "control --reload-rules\" failed: %s",
+                     strerror(-rc));
+        }
         return rc;
     }
     rc = run_tool(trigger);
@@ -282,9 +296,11 @@ int as_udev_install(char *err, size_t errlen)
         return 0;
     }
     if (rc < 0) {
-        snprintf(err, errlen, "the rules file is installed, but \"udevadm "
-                              "trigger\" failed: %s; replug the device",
-                 strerror(-rc));
+        if (err && errlen) {
+            snprintf(err, errlen, "the rules file is installed, but \"udevadm "
+                                  "trigger\" failed: %s; replug the device",
+                     strerror(-rc));
+        }
     }
     return rc;
 }

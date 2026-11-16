@@ -98,8 +98,12 @@ static int exchange(struct as_mouse *m, const uint8_t *pkt, uint8_t *reply,
             if (ret < PACKET_LEN + 1 || buf[0] != REPORT_ID) {
                 continue;
             }
-            /* The echo starts at buf[1]; a reply must repeat it. */
-            if (memcmp(buf + 1, pkt, (size_t)echo_len) == 0) {
+            /* The echo starts at buf[1]; a reply must repeat it. A device
+             * that understands but refuses the command answers with the
+             * command byte and status 1 instead of the echo, and callers
+             * need that answer rather than a timeout. */
+            if (memcmp(buf + 1, pkt, (size_t)echo_len) == 0 ||
+                (buf[1] == pkt[0] && buf[2] == 1)) {
                 if (reply) {
                     size_t n = (size_t)ret - 1;
 
@@ -205,6 +209,11 @@ static int flash_io(struct as_mouse *m, uint8_t cmd, unsigned addr, uint8_t *buf
         ret = exchange(m, pkt, reply, 5);
         if (ret < 0) {
             return ret;
+        }
+        /* reply[1]: 0 - data, 1 - understood but not supported. Without this
+         * check a refused EEPROM write looks like a successful one. */
+        if (reply[1] != 0) {
+            return reply[1] == 1 ? -EREMOTEIO : -EIO;
         }
         if (!write_cmd) {
             if ((reply[4] & 0x0f) != chunk) {
@@ -372,7 +381,8 @@ int as_mouse_read_state(struct as_mouse *m, struct as_mouse_state *st)
         reply[1] == 0) {
         st->profile = reply[5];
     }
-    if (as_mouse_raw(m, AS_M_CMD_BATTERY, 0, NULL, 0, reply) == 0) {
+    if (as_mouse_raw(m, AS_M_CMD_BATTERY, 0, NULL, 0, reply) == 0 &&
+        reply[1] == 0) {
         st->charging = reply[6] == 1;
         if (reply[9] == 1) {
             st->battery = reply[10];
