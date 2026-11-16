@@ -7,8 +7,10 @@
 #include <gio/gio.h>
 
 #include <errno.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <string.h>
+#include <unistd.h>
 
 enum {
     SIGNAL_CHANGED,
@@ -42,11 +44,13 @@ struct _AsStore {
     GHashTable *handles;   /* path -> Handle*, worker thread only */
     gboolean busy;
     guint settle_id;
-    /* Travel demo: one poll of the analog report in flight at a time. */
+    /* Travel demo: the main loop reads its own duplicate of the analog
+     * report, so the worker is never on the demo's critical path. */
     gint analog_running;
     gint analog_generation;
     char analog_path[64];
     gint travel[AS_KB_KEY_MAX];
+    int analog_fd;
     guint analog_timer;
 };
 
@@ -458,6 +462,7 @@ typedef struct {
     AsStore *store;
     char *path;
     gint generation;
+    int fd;
 } AnalogJob;
 
 static void analog_job_done(gpointer data, GError *error, gpointer user_data);
@@ -466,6 +471,9 @@ static void analog_job_free(gpointer data)
 {
     AnalogJob *job = data;
 
+    if (job->fd >= 0) {
+        close(job->fd);
+    }
     g_free(job->path);
     g_free(job);
 }
@@ -474,13 +482,8 @@ static void analog_job_run(gpointer data, GError **error)
 {
     AnalogJob *job = data;
     Handle *h = g_hash_table_lookup(job->store->handles, job->path);
-    int32_t values[AS_KB_KEY_MAX];
-    uint8_t buf[64];
-    int n, rc;
+    int rc;
 
-    for (int i = 0; i < AS_KB_KEY_MAX; i++) {
-        values[i] = -1;
-    }
     if (!h || h->kind != AS_DEVICE_KEYBOARD) {
         g_set_error(error, G_IO_ERROR, G_IO_ERROR_NOT_FOUND,
                     "keyboard %s is not connected", job->path);
@@ -504,41 +507,64 @@ static void analog_job_run(gpointer data, GError **error)
             return;
         }
     }
-    for (int report = 0; report < 256; report++) {
-        n = as_hid_read(&h->kb.analog, buf, sizeof(buf), report == 0 ? 8 : 0);
-        if (n < 0) {
-            g_set_error(error, G_IO_ERROR, G_IO_ERROR_FAILED, "%s", as_strerror(n));
-            return;
-        }
-        if (n == 0) {
-            break;
-        }
-        as_kb_parse_analog(buf, (size_t)n, values);
-    }
-    if (g_atomic_int_get(&job->store->analog_generation) == job->generation) {
-        for (int i = 0; i < AS_KB_KEY_MAX; i++) {
-            if (values[i] >= 0) {
-                g_atomic_int_set(&job->store->travel[i], values[i]);
-            }
-        }
+    /* The reports are read on the main loop through this duplicate, so a scan
+     * or a write aimed at another device on the worker cannot starve the
+     * demo, and closing the worker's node cannot take the stream away. */
+    job->fd = fcntl(h->kb.analog.fd, F_DUPFD_CLOEXEC, 0);
+    if (job->fd < 0) {
+        g_set_error(error, G_IO_ERROR, G_IO_ERROR_FAILED, "%s",
+                    as_strerror(-errno));
     }
 }
 
-static gboolean analog_schedule(gpointer data)
+/* Drains the reports that arrived since the last tick. This runs on the main
+ * loop and only does non-blocking reads, so it stays independent of whatever
+ * the worker happens to be doing. */
+static gboolean analog_tick(gpointer data)
 {
     AsStore *self = data;
-    AnalogJob *job;
+    struct as_hid hid = { .fd = self->analog_fd };
+    int32_t values[AS_KB_KEY_MAX];
+    uint8_t buf[64];
+    gboolean got = FALSE;
+    int n;
 
-    self->analog_timer = 0;
-    if (!g_atomic_int_get(&self->analog_running)) {
+    if (!g_atomic_int_get(&self->analog_running) || self->analog_fd < 0) {
+        self->analog_timer = 0;
         return G_SOURCE_REMOVE;
     }
-    job = g_new0(AnalogJob, 1);
-    job->store = self;
-    job->path = g_strdup(self->analog_path);
-    job->generation = g_atomic_int_get(&self->analog_generation);
-    as_job_run(analog_job_run, job, analog_job_free, analog_job_done, NULL, NULL);
-    return G_SOURCE_REMOVE;
+    for (int i = 0; i < AS_KB_KEY_MAX; i++) {
+        values[i] = -1;
+    }
+    for (int report = 0; report < 256; report++) {
+        n = as_hid_read(&hid, buf, sizeof(buf), 0);
+        /* An empty queue is the normal state between ticks: the keyboard
+         * streams at its own pace. */
+        if (n == -ETIMEDOUT || n == -EAGAIN || n == -EINTR) {
+            break;
+        }
+        if (n <= 0) {
+            self->analog_timer = 0;
+            as_store_analog_stop(self);
+            g_signal_emit(self, signals[SIGNAL_ANALOG], 0);
+            g_signal_emit(self, signals[SIGNAL_ERROR], 0, (const char *)NULL,
+                          n == 0 ? "the keyboard stopped streaming"
+                                 : as_strerror(n));
+            return G_SOURCE_REMOVE;
+        }
+        if (as_kb_parse_analog(buf, (size_t)n, values)) {
+            got = TRUE;
+        }
+    }
+    if (got) {
+        for (int i = 0; i < AS_KB_KEY_MAX; i++) {
+            if (values[i] >= 0) {
+                g_atomic_int_set(&self->travel[i], values[i]);
+            }
+        }
+        g_signal_emit(self, signals[SIGNAL_ANALOG], 0);
+    }
+    return G_SOURCE_CONTINUE;
 }
 
 static void analog_job_done(gpointer data, GError *error, gpointer user_data)
@@ -557,9 +583,10 @@ static void analog_job_done(gpointer data, GError *error, gpointer user_data)
         g_signal_emit(self, signals[SIGNAL_ERROR], 0, job->path, error->message);
         return;
     }
-    g_signal_emit(self, signals[SIGNAL_ANALOG], 0);
+    self->analog_fd = job->fd;
+    job->fd = -1;
     if (!self->analog_timer) {
-        self->analog_timer = g_timeout_add(16, analog_schedule, self);
+        self->analog_timer = g_timeout_add(16, analog_tick, self);
     }
 }
 
@@ -580,17 +607,20 @@ static void analog_off_run(gpointer data, GError **error)
 {
     AnalogOff *off = data;
     Handle *h = g_hash_table_lookup(off->store->handles, off->path);
-    uint8_t buf[64];
 
     (void)error;
-    if (!h || h->kind != AS_DEVICE_KEYBOARD || !h->kb.analog_open) {
+    if (!h || h->kind != AS_DEVICE_KEYBOARD) {
         return;
     }
-    for (int i = 0; i < 32 && as_hid_read(&h->kb.analog, buf, sizeof(buf), 0) > 0; i++) {
+    /* The firmware keeps streaming even when a rescan has closed the local
+     * analog node, so the command is sent whenever the keyboard is reachable. */
+    if (h->kb.analog_open) {
+        as_hid_close(&h->kb.analog);
+        h->kb.analog_open = 0;
     }
-    as_keyboard_enable_stream(&h->kb, 0);
-    as_hid_close(&h->kb.analog);
-    h->kb.analog_open = 0;
+    if (handle_open(h) == 0) {
+        as_keyboard_enable_stream(&h->kb, 0);
+    }
 }
 
 gboolean as_store_analog_start(AsStore *self, const char *path)
@@ -613,6 +643,7 @@ gboolean as_store_analog_start(AsStore *self, const char *path)
     job = g_new0(AnalogJob, 1);
     job->store = self;
     job->path = g_strdup(path);
+    job->fd = -1;
     job->generation = g_atomic_int_get(&self->analog_generation);
     as_job_run(analog_job_run, job, analog_job_free, analog_job_done, NULL, NULL);
     return TRUE;
@@ -622,7 +653,8 @@ void as_store_analog_stop(AsStore *self)
 {
     AnalogOff *off;
 
-    if (!g_atomic_int_get(&self->analog_running) && !self->analog_timer) {
+    if (!g_atomic_int_get(&self->analog_running) && !self->analog_timer &&
+        self->analog_fd < 0) {
         return;
     }
     off = g_new0(AnalogOff, 1);
@@ -633,6 +665,10 @@ void as_store_analog_stop(AsStore *self)
     if (self->analog_timer) {
         g_source_remove(self->analog_timer);
         self->analog_timer = 0;
+    }
+    if (self->analog_fd >= 0) {
+        close(self->analog_fd);
+        self->analog_fd = -1;
     }
     self->analog_path[0] = 0;
     for (int i = 0; i < AS_KB_KEY_MAX; i++) {
@@ -1053,10 +1089,15 @@ gboolean as_store_apply(AsStore *self, const char *path, const AsOpRequest *req)
 
 void as_store_shutdown(AsStore *self)
 {
-    self->analog_running = FALSE;
+    g_atomic_int_set(&self->analog_running, FALSE);
+    g_atomic_int_inc(&self->analog_generation);
     if (self->analog_timer) {
         g_source_remove(self->analog_timer);
         self->analog_timer = 0;
+    }
+    if (self->analog_fd >= 0) {
+        close(self->analog_fd);
+        self->analog_fd = -1;
     }
     if (self->settle_id) {
         g_source_remove(self->settle_id);
@@ -1069,6 +1110,15 @@ static void as_store_finalize(GObject *object)
 {
     AsStore *self = AS_STORE(object);
 
+    if (self->analog_timer) {
+        g_source_remove(self->analog_timer);
+    }
+    if (self->analog_fd >= 0) {
+        close(self->analog_fd);
+    }
+    if (self->settle_id) {
+        g_source_remove(self->settle_id);
+    }
     g_hash_table_destroy(self->handles);
     g_ptr_array_free(self->devices, TRUE);
     G_OBJECT_CLASS(as_store_parent_class)->finalize(object);
@@ -1101,6 +1151,7 @@ static void as_store_class_init(AsStoreClass *klass)
 
 static void as_store_init(AsStore *self)
 {
+    self->analog_fd = -1;
     self->devices = g_ptr_array_new_with_free_func(g_free);
     self->handles = g_hash_table_new_full(g_str_hash, g_str_equal, g_free,
                                           handle_destroy);

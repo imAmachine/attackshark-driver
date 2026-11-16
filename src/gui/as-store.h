@@ -1,7 +1,9 @@
 /* SPDX-License-Identifier: MIT
  *
- * Device registry for the GUI. All hidraw access happens on the worker thread;
- * the main thread only ever sees immutable snapshots that are replaced as a
+ * Device registry for the GUI. Blocking hidraw access happens on the worker
+ * thread; the only exception is the travel stream, which the main loop reads
+ * non-blocking from its own duplicate so no other device can stall a demo.
+ * The main thread only ever sees immutable snapshots that are replaced as a
  * whole, so widgets can read them without locking.
  */
 #ifndef AS_STORE_H
@@ -148,8 +150,9 @@ gboolean as_store_permissions_denied(AsStore *self);
  * window runs its own helper through pkexec. */
 void as_store_fix_permissions(AsStore *self);
 
-/* Analog travel stream of one keyboard, used by the switch demo. It is polled
- * on the worker thread and the "analog" signal fires when values arrived. */
+/* Analog travel stream of one keyboard, used by the switch demo. The main
+ * loop reads its own duplicate of the report, so other devices' I/O on the
+ * worker cannot stall it; "analog" fires when values arrived. */
 gboolean as_store_analog_start(AsStore *self, const char *path);
 void as_store_analog_stop(AsStore *self);
 /* Travel of one matrix position in thousandths of a millimetre, 0 when the
