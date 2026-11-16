@@ -121,6 +121,9 @@ typedef struct {
     guint refresh_id;
     guint32 signature;
     gboolean updating;
+    guint64 pending_request;
+    gboolean edited_while_pending;
+    int pending_count;
 } KeyDialog;
 
 enum {
@@ -156,7 +159,9 @@ static void refresh_from_device(KeyDialog *d)
     }
     d->signature = as_ui_device_signature(dev);
     refresh_key_styles(d);
-    load_values(d);
+    if (!d->edited) {
+        load_values(d);
+    }
 }
 
 static void on_store_changed(AsStore *store, gpointer data)
@@ -357,9 +362,13 @@ static void update_status(KeyDialog *d)
     char buf[64];
     int n = selection_count(d);
 
-    snprintf(buf, sizeof(buf), "Выбрано клавиш: %d", n);
+    if (d->pending_request) {
+        snprintf(buf, sizeof(buf), "Применение к клавишам: %d…", d->pending_count);
+    } else {
+        snprintf(buf, sizeof(buf), "Выбрано клавиш: %d", n);
+    }
     gtk_label_set_text(GTK_LABEL(d->status), buf);
-    gtk_widget_set_sensitive(d->apply, n > 0);
+    gtk_widget_set_sensitive(d->apply, n > 0 && !d->pending_request);
     refresh_group_buttons(d);
 }
 
@@ -459,8 +468,34 @@ static void on_group_toggled(GtkToggleButton *button, gpointer data)
     sync_selection(d);
 }
 
+static void on_operation_completed(AsStore *store, const char *path, int op,
+                                   guint64 request_id, gboolean success,
+                                   gpointer data)
+{
+    KeyDialog *d = data;
+    char buf[128];
+
+    (void)store;
+    if (g_strcmp0(path, d->path) != 0 || op != AS_OP_KB_KEYS_TRAVEL ||
+        !d->pending_request || request_id != d->pending_request) {
+        return;
+    }
+    d->pending_request = 0;
+    gtk_widget_set_sensitive(d->apply, selection_count(d) > 0);
+    if (!success) {
+        d->edited = TRUE;
+        return;
+    }
+    d->edited = d->edited_while_pending;
+    refresh_from_device(d);
+    snprintf(buf, sizeof(buf), "Применено к клавишам: %d%s", d->pending_count,
+             d->edited ? "; есть новые изменения" : "");
+    gtk_label_set_text(GTK_LABEL(d->status), buf);
+}
+
 static void on_apply(GtkButton *button, gpointer data)
 {
+    static guint64 next_request_id;
     KeyDialog *d = data;
     AsOpRequest req = {
         .op = AS_OP_KB_KEYS_TRAVEL,
@@ -471,10 +506,13 @@ static void on_apply(GtkButton *button, gpointer data)
         .rt_release = d->rtr,
         .deadzone = d->dz,
     };
-    char buf[64];
     gboolean restart = d->demo_active;
 
     (void)button;
+    if (d->pending_request || selection_count(d) == 0) {
+        return;
+    }
+    req.request_id = ++next_request_id;
     /* The firmware does not take configuration commands while the travel
      * stream is running, so the demo pauses for the write and resumes after
      * it: the worker queue keeps that order. */
@@ -486,15 +524,18 @@ static void on_apply(GtkButton *button, gpointer data)
         if (restart) {
             as_store_analog_start(d->store, d->path);
         }
+        gtk_label_set_text(GTK_LABEL(d->status), "Устройство недоступно");
         return;
     }
+    d->pending_request = req.request_id;
+    d->pending_count = selection_count(d);
+    d->edited_while_pending = FALSE;
+    d->edited = TRUE;
+    gtk_widget_set_sensitive(d->apply, FALSE);
+    gtk_label_set_text(GTK_LABEL(d->status), "Применение…");
     if (restart) {
         as_store_analog_start(d->store, d->path);
     }
-    snprintf(buf, sizeof(buf), "Применено к клавишам: %d",
-             selection_count(d));
-    gtk_label_set_text(GTK_LABEL(d->status), buf);
-    d->edited = FALSE;
 }
 
 /* Every switch gets the same starting point the vendor uses in its "gaming"
@@ -521,6 +562,7 @@ static void on_switch_type(AdwComboRow *row, GParamSpec *pspec, gpointer data)
     as_ui_switch_set(d->rt, &d->updating, TRUE);
     d->updating = previous;
     d->edited = TRUE;
+    d->edited_while_pending = TRUE;
 }
 
 static void on_close(GtkButton *button, gpointer data)
@@ -533,8 +575,23 @@ static void on_slider_changed(gpointer data)
 {
     KeyDialog *d = data;
 
-    d->edited = TRUE;
+    if (!d->updating) {
+        d->edited = TRUE;
+        d->edited_while_pending = TRUE;
+    }
     gtk_widget_queue_draw(d->demo_area);
+}
+
+static void on_rt_toggle(AdwSwitchRow *row, GParamSpec *pspec, gpointer data)
+{
+    KeyDialog *d = data;
+
+    (void)row;
+    (void)pspec;
+    if (!d->updating) {
+        d->edited = TRUE;
+        d->edited_while_pending = TRUE;
+    }
 }
 
 static void on_demo_toggle(AdwSwitchRow *row, GParamSpec *pspec, gpointer data)
@@ -932,6 +989,7 @@ void as_key_dialog_open(GtkWindow *parent, AsStore *store, const char *path)
                                 KEY_MAX_TRIGGER, &d->rtr, AS_KB_DEFAULT_RT, d);
     d->deadzone = make_slider(group, "Мёртвая зона", 0.0, 1.0, &d->dz, 0.3, d);
     d->rt = as_ui_switch_row("Rapid Trigger", NULL);
+    g_signal_connect(d->rt, "notify::active", G_CALLBACK(on_rt_toggle), d);
     gtk_widget_set_tooltip_text(GTK_WIDGET(d->rt),
                                 "Rapid Trigger: клавиша отпускается сразу, "
                                 "как только ход уменьшился на заданное значение");
@@ -1013,6 +1071,8 @@ void as_key_dialog_open(GtkWindow *parent, AsStore *store, const char *path)
      * way so the sliders never show stale numbers. */
     g_signal_connect(store, "changed", G_CALLBACK(on_store_changed), d);
     g_signal_connect(store, "error", G_CALLBACK(on_store_error), d);
+    g_signal_connect(store, "operation-completed",
+                     G_CALLBACK(on_operation_completed), d);
     d->demo_key = keyboxes[0].pos;
     d->updating = TRUE;
     gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(d->buttons[0]), TRUE);

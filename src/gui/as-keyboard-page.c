@@ -50,7 +50,9 @@ typedef struct {
     AdwComboRow *row_snap_mode;
     AdwSwitchRow *sw_snap_full;
     AdwPreferencesGroup *snap_group;
-    guint32 key_signature;
+    gboolean key_list_initialized;
+    int key_code_valid;
+    uint32_t key_codes[AS_KB_KEY_MAX];
     int key_positions[AS_KB_KEY_MAX];
     int key_count;
     /* Matrix positions chosen for the Snap Tap pair, -1 until a key is
@@ -131,13 +133,15 @@ static gint key_rank_cmp(gconstpointer a, gconstpointer b)
  * layout dialog and the Snap Tap pickers share one definition of order. */
 static void rebuild_key_lists(AsKeyboardPage *p, AsDevice *dev)
 {
-    guint32 sig = as_ui_device_signature(dev);
     int count = 0;
 
-    if (sig == p->key_signature) {
+    if (p->key_list_initialized && p->key_code_valid == dev->key_code_valid &&
+        memcmp(p->key_codes, dev->key_code, sizeof(p->key_codes)) == 0) {
         return;
     }
-    p->key_signature = sig;
+    p->key_list_initialized = TRUE;
+    p->key_code_valid = dev->key_code_valid;
+    memcpy(p->key_codes, dev->key_code, sizeof(p->key_codes));
     for (int i = 0; i < AS_KB_KEY_MAX; i++) {
         if (dev->key_code_valid && dev->key_code[i] == 0) {
             continue;

@@ -109,6 +109,7 @@ enum {
 };
 
 typedef struct {
+    guint64 request_id;
     int op;
     int index;              /* dpi stage, 0-based */
     int value;

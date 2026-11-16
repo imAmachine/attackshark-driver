@@ -15,6 +15,7 @@ enum {
     SIGNAL_ERROR,
     SIGNAL_PERMISSIONS_FIXED,
     SIGNAL_ANALOG,
+    SIGNAL_OPERATION_COMPLETED,
     N_SIGNALS,
 };
 
@@ -857,6 +858,8 @@ static void apply_job_done(gpointer data, GError *error, gpointer user_data)
     if (error) {
         g_signal_emit(job->store, signals[SIGNAL_ERROR], 0, job->path,
                       error->message);
+        g_signal_emit(job->store, signals[SIGNAL_OPERATION_COMPLETED], 0,
+                      job->path, job->req.op, job->req.request_id, FALSE);
         return;
     }
     AsDevice *dev = as_store_lookup(job->store, job->path);
@@ -866,6 +869,8 @@ static void apply_job_done(gpointer data, GError *error, gpointer user_data)
     }
     g_signal_emit(job->store, signals[SIGNAL_CHANGED], 0);
     schedule_settle(job->store);
+    g_signal_emit(job->store, signals[SIGNAL_OPERATION_COMPLETED], 0,
+                  job->path, job->req.op, job->req.request_id, TRUE);
 }
 
 /* -------------------------------- API --------------------------------- */
@@ -1029,6 +1034,10 @@ static void as_store_class_init(AsStoreClass *klass)
     signals[SIGNAL_PERMISSIONS_FIXED] =
         g_signal_new("permissions-fixed", G_TYPE_FROM_CLASS(klass),
                      G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 0);
+    signals[SIGNAL_OPERATION_COMPLETED] =
+        g_signal_new("operation-completed", G_TYPE_FROM_CLASS(klass),
+                     G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 4,
+                     G_TYPE_STRING, G_TYPE_INT, G_TYPE_UINT64, G_TYPE_BOOLEAN);
     signals[SIGNAL_ANALOG] =
         g_signal_new("analog", G_TYPE_FROM_CLASS(klass), G_SIGNAL_RUN_LAST, 0,
                      NULL, NULL, NULL, G_TYPE_NONE, 0);

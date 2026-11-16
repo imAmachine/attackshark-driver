@@ -529,7 +529,9 @@ void as_page_queue(AsPage *page, const AsOpRequest *req)
     int slot = -1;
 
     for (int i = 0; i < page->pending_count; i++) {
-        if (page->pending[i].op == req->op) {
+        if (page->pending[i].op == req->op &&
+            ((req->op != AS_OP_MOUSE_DPI_STAGE && req->op != AS_OP_KB_SNAP) ||
+             page->pending[i].index == req->index)) {
             slot = i;
             break;
         }
