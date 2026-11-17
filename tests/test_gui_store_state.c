@@ -66,11 +66,39 @@ static int mock_keyboard_open_path(struct as_keyboard *kb, const char *path)
     return -ENODEV;
 }
 
+static uint8_t incoming_reports[16][5];
+static guint incoming_count;
+static guint incoming_index;
+
+static int mock_hid_read(struct as_hid *hid, void *buf, size_t len, int timeout)
+{
+    (void)hid;
+    (void)timeout;
+    g_assert_cmpuint(len, >=, 5);
+    if (incoming_index == incoming_count) {
+        return -EAGAIN;
+    }
+    memcpy(buf, incoming_reports[incoming_index++], 5);
+    return 5;
+}
+
+static void incoming(int key, int depth)
+{
+    int raw = depth / 5;
+    incoming_reports[incoming_count][0] = 0x05;
+    incoming_reports[incoming_count][1] = 0x1b;
+    incoming_reports[incoming_count][2] = raw & 255;
+    incoming_reports[incoming_count][3] = raw >> 8;
+    incoming_reports[incoming_count++][4] = key;
+}
+
+#define as_hid_read mock_hid_read
 #define as_mouse_open_path mock_mouse_open_path
 #define as_keyboard_open_path mock_keyboard_open_path
 #define as_job_run capture_job
 #define as_job_run_for_device capture_device_job
 #include "../src/gui/as-store.c"
+#undef as_hid_read
 #undef as_job_run_for_device
 #undef as_job_run
 #undef as_mouse_open_path
@@ -499,9 +527,100 @@ static void test_enumeration_publication(void)
     g_object_unref(store);
 }
 
+static void test_active_scan(void)
+{
+    AsStore *store = g_object_new(AS_TYPE_STORE, NULL);
+    RefreshJob scan = { .store = store, .count = 1 };
+    scan.found[0].vid = 0x3151;
+    scan.found[0].pid = 0x5030;
+    g_strlcpy(scan.found[0].path, "/nonexistent/active-scan",
+              sizeof(scan.found[0].path));
+    g_assert_cmpint(classify(&scan.found[0]), >=, 0);
+    refresh_job_done(&scan, NULL, NULL);
+    release_job();
+    Handle *h = g_hash_table_lookup(store->handles, scan.found[0].path);
+    h->refreshing = FALSE;
+    h->config_pending = 0;
+    store->analog_running = TRUE;
+    g_strlcpy(store->analog_path, h->path, sizeof(store->analog_path));
+    store->analog_fd = open("/dev/null", O_RDONLY);
+    int fd = store->analog_fd;
+    int generation = store->analog_generation;
+    guint before = queued;
+    refresh_job_done(&scan, NULL, NULL);
+    g_assert_cmpuint(queued, ==, before);
+    g_assert_cmpint(store->analog_fd, ==, fd);
+    g_assert_cmpint(fcntl(fd, F_GETFD), >=, 0);
+    g_assert_cmpint(store->analog_generation, ==, generation);
+    g_assert_cmpuint(h->config_pending, ==, 0);
+    g_assert_true(store->analog_running);
+    scan.count = 0;
+    refresh_job_done(&scan, NULL, NULL);
+    g_assert_false(store->analog_running);
+    g_assert_cmpint(store->analog_fd, ==, -1);
+    g_assert_cmpuint(store->devices->len, ==, 0);
+    release_job();
+    as_store_shutdown(store);
+    g_object_unref(store);
+}
+
+static void test_analog_freshness(void)
+{
+    AsStore *store = g_object_new(AS_TYPE_STORE, NULL);
+    AsDevice *dev = device_new();
+    g_ptr_array_add(store->devices, dev);
+    Handle *h = publish_handle(store, dev);
+    h->config_pending = 1;
+    g_assert_true(as_store_analog_start(store, dev->path));
+    store->analog_fd = open("/dev/null", O_RDONLY);
+    g_assert_cmpint(store->analog_fd, >=, 0);
+    incoming(9, 2000);
+    incoming(1, 1500);
+    incoming(9, 1995);
+    incoming(1, 1500);
+    analog_tick(store);
+    guint64 a = as_store_travel_sequence(store, dev->path, 9);
+    guint64 b = as_store_travel_sequence(store, dev->path, 1);
+    g_assert_cmpuint(a, >, b);
+    g_assert_cmpuint(b, >, 0);
+    g_assert_cmpint(as_store_travel(store, dev->path, 9), ==, 1995);
+    incoming_count = incoming_index = 0;
+    incoming(1, 1500);
+    incoming(9, 1995);
+    incoming(2, 0);
+    analog_tick(store);
+    g_assert_cmpuint(as_store_travel_sequence(store, dev->path, 9), ==, a);
+    g_assert_cmpuint(as_store_travel_sequence(store, dev->path, 1), ==, b);
+    g_assert_cmpuint(as_store_travel_sequence(store, dev->path, 2), ==, 0);
+    incoming_count = incoming_index = 0;
+    incoming(9, 0);
+    analog_tick(store);
+    g_assert_cmpuint(as_store_travel_sequence(store, dev->path, 9), >, a);
+    g_assert_cmpint(as_store_travel(store, dev->path, 9), ==, 0);
+    config_begin(store, h);
+    g_assert_cmpuint(as_store_travel_sequence(store, dev->path, 1), ==, b);
+    as_store_analog_stop(store);
+    g_assert_cmpuint(as_store_travel_sequence(store, dev->path, 1), ==, 0);
+    release_job();
+    g_assert_true(as_store_analog_start(store, dev->path));
+    g_assert_cmpuint(as_store_travel_sequence(store, dev->path, 1), ==, 0);
+    store->analog_fd = open("/dev/null", O_RDONLY);
+    incoming_count = incoming_index = 0;
+    incoming(1, 1500);
+    analog_tick(store);
+    g_assert_cmpuint(as_store_travel_sequence(store, dev->path, 1), >, a);
+    as_store_analog_stop(store);
+    release_job();
+    as_store_shutdown(store);
+    g_object_unref(store);
+    incoming_count = incoming_index = 0;
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
+    g_test_add_func("/store/analog-freshness", test_analog_freshness);
+    g_test_add_func("/store/active-scan", test_active_scan);
     g_test_add_func("/store/retired-execution", test_retired_execution);
     g_test_add_func("/store/stale-apply", test_stale_apply);
     g_test_add_func("/store/cross-device", test_cross_device);

@@ -17,6 +17,7 @@ tests/test_gui_store_state
 tests/test_gui_window
 tests/test_gui_worker
 tests/test_gui_store_threads
+tests/test_gui_analog
 compile_commands.json
 ref/
 .cache/

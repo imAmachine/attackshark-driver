@@ -536,6 +536,7 @@ int as_kb_parse_analog(const uint8_t *buf, size_t len, int32_t *travel)
         }
         raw = buf[i + 1] | (buf[i + 2] << 8);
         key = buf[i + 3];
+        i += 3;
         if (key < 0 || key >= AS_KB_KEY_MAX) {
             continue;
         }
@@ -546,7 +547,6 @@ int as_kb_parse_analog(const uint8_t *buf, size_t len, int32_t *travel)
             travel[key] = 5000;
         }
         found = 1;
-        i += 3;
     }
     return found;
 }

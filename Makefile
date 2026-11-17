@@ -128,7 +128,7 @@ tests/test_gui_ui: tests/test_gui_ui.c $(GUI_SRC) $(wildcard src/gui/*.h) $(LIB)
 	$(CC) $(CPPFLAGS) -Isrc/gui $(GUI_CFLAGS) $(CFLAGS) $(LDFLAGS) -o $@ tests/test_gui_ui.c \
 		src/gui/as-store.c src/gui/as-worker.c $(LIB) $(GUI_LIBS) $(LDLIBS) -lm
 
-GUI_SAFE_TEST_SRC := $(wildcard tests/test_gui_store_mock.c tests/test_gui_store_state.c tests/test_gui_dialog.c tests/test_gui_pages.c tests/test_gui_window.c tests/test_gui_worker.c tests/test_gui_store_threads.c)
+GUI_SAFE_TEST_SRC := $(wildcard tests/test_gui_store_mock.c tests/test_gui_store_state.c tests/test_gui_dialog.c tests/test_gui_pages.c tests/test_gui_window.c tests/test_gui_worker.c tests/test_gui_store_threads.c tests/test_gui_analog.c)
 GUI_SAFE_TESTS := $(GUI_SAFE_TEST_SRC:.c=)
 
 tests/test_gui_store_mock: tests/test_gui_store_mock.c tests/test_gui_store.c $(GUI_SRC) $(wildcard src/gui/*.h)
@@ -145,6 +145,9 @@ tests/test_gui_pages: tests/test_gui_pages.c $(GUI_SRC) $(wildcard src/gui/*.h) 
 
 tests/test_gui_window: tests/test_gui_window.c $(GUI_SRC) $(wildcard src/gui/*.h)
 	$(CC) $(CPPFLAGS) -Isrc/gui $(GUI_CFLAGS) $(CFLAGS) -ffunction-sections -fdata-sections $(LDFLAGS) -Wl,--gc-sections -o $@ $< $(GUI_LIBS) $(LDLIBS) -lm
+
+tests/test_gui_analog: tests/test_gui_analog.c $(GUI_SRC) $(wildcard src/gui/*.h) $(LIB)
+	$(CC) $(CPPFLAGS) -Isrc/gui $(GUI_CFLAGS) $(CFLAGS) $(LDFLAGS) -o $@ $< src/gui/as-worker.c $(LIB) $(GUI_LIBS) $(LDLIBS) -lm
 
 tests/test_gui_store_threads: tests/test_gui_store_threads.c $(GUI_SRC) $(wildcard src/gui/*.h) $(LIB)
 	$(CC) $(CPPFLAGS) -Isrc/gui $(GUI_CFLAGS) $(CFLAGS) $(LDFLAGS) -o $@ $< src/gui/as-worker.c $(LIB) $(GUI_LIBS) $(LDLIBS) -lm

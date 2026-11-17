@@ -160,6 +160,7 @@ void as_store_analog_stop(AsStore *self);
 /* Travel of one matrix position in thousandths of a millimetre, 0 when the
  * stream is off or that key is released. */
 int as_store_travel(AsStore *self, const char *path, int key);
+guint64 as_store_travel_sequence(AsStore *self, const char *path, int key);
 
 /* Queues a write. Returns FALSE when the device is unknown. */
 gboolean as_store_apply(AsStore *self, const char *path, const AsOpRequest *req);

@@ -181,6 +181,13 @@ static void test_analog(void)
     assert(as_kb_parse_analog(report, 2, travel) == 0);
     report[0] = 0x04;
     assert(as_kb_parse_analog(report, sizeof(report), travel) == 0);
+    uint8_t invalid[] = { 0x05, 0x1b, 0x1b, 0x01, 0xff, 0x09,
+                          0x1b, 0x02, 0x00, 0x15 };
+    travel[9] = 123;
+    assert(as_kb_parse_analog(invalid, sizeof(invalid), travel) == 1);
+    assert(travel[9] == 123);
+    assert(travel[0x15] == 10);
+    assert(as_kb_parse_analog(invalid, 6, travel) == 0);
     printf("analog stream ok\n");
 }
 

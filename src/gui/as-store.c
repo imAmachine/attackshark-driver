@@ -59,6 +59,8 @@ struct _AsStore {
     gint analog_generation;
     char analog_path[64];
     gint travel[AS_KB_KEY_MAX];
+    guint64 sample_sequence;
+    guint64 travel_sequence[AS_KB_KEY_MAX];
     int analog_fd;
     guint analog_timer;
 };
@@ -521,7 +523,10 @@ static void refresh_job_done(gpointer data, GError *error, gpointer user_data)
                     store_merge(self, identity);
                     g_ptr_array_free(identity, TRUE);
                 }
-                store_request(self, hid->path);
+                if (!g_atomic_int_get(&self->analog_running) ||
+                    strcmp(self->analog_path, hid->path) != 0) {
+                    store_request(self, hid->path);
+                }
             }
             g_hash_table_iter_init(&iter, self->handles);
             while (g_hash_table_iter_next(&iter, &key, &value)) {
@@ -664,15 +669,12 @@ static gboolean analog_tick(gpointer data)
     struct as_hid hid = { .fd = self->analog_fd };
     int32_t values[AS_KB_KEY_MAX];
     uint8_t buf[64];
-    gboolean got = FALSE;
+    int generation = g_atomic_int_get(&self->analog_generation);
     int n;
 
     if (!g_atomic_int_get(&self->analog_running) || self->analog_fd < 0) {
         self->analog_timer = 0;
         return G_SOURCE_REMOVE;
-    }
-    for (int i = 0; i < AS_KB_KEY_MAX; i++) {
-        values[i] = -1;
     }
     for (int report = 0; report < 256; report++) {
         n = as_hid_read(&hid, buf, sizeof(buf), 0);
@@ -690,17 +692,37 @@ static gboolean analog_tick(gpointer data)
                                  : as_strerror(n));
             return G_SOURCE_REMOVE;
         }
-        if (as_kb_parse_analog(buf, (size_t)n, values)) {
-            got = TRUE;
+        if (buf[0] != 0x05) {
+            continue;
         }
-    }
-    if (got) {
-        for (int i = 0; i < AS_KB_KEY_MAX; i++) {
-            if (values[i] >= 0) {
-                g_atomic_int_set(&self->travel[i], values[i]);
+        for (size_t offset = 1; offset + 3 < (size_t)n; offset++) {
+            uint8_t record[5] = { 0x05 };
+
+            if (buf[offset] != 0x1b) {
+                continue;
+            }
+            memcpy(record + 1, buf + offset, 4);
+            offset += 3;
+            for (int i = 0; i < AS_KB_KEY_MAX; i++) {
+                values[i] = -1;
+            }
+            if (!as_kb_parse_analog(record, sizeof(record), values)) {
+                continue;
+            }
+            for (int i = 0; i < AS_KB_KEY_MAX; i++) {
+                if (values[i] >= 0 &&
+                    values[i] != g_atomic_int_get(&self->travel[i])) {
+                    g_atomic_int_set(&self->travel[i], values[i]);
+                    self->travel_sequence[i] = ++self->sample_sequence;
+                }
+            }
+            g_signal_emit(self, signals[SIGNAL_ANALOG], 0);
+            if (generation != g_atomic_int_get(&self->analog_generation) ||
+                !g_atomic_int_get(&self->analog_running) ||
+                hid.fd != self->analog_fd) {
+                return G_SOURCE_REMOVE;
             }
         }
-        g_signal_emit(self, signals[SIGNAL_ANALOG], 0);
     }
     return G_SOURCE_CONTINUE;
 }
@@ -782,6 +804,7 @@ gboolean as_store_analog_start(AsStore *self, const char *path)
     g_atomic_int_set(&self->analog_running, TRUE);
     for (int i = 0; i < AS_KB_KEY_MAX; i++) {
         g_atomic_int_set(&self->travel[i], 0);
+        self->travel_sequence[i] = 0;
     }
     Handle *h = g_hash_table_lookup(self->handles, path);
     if (!h) {
@@ -827,6 +850,7 @@ void as_store_analog_stop(AsStore *self)
     self->analog_path[0] = 0;
     for (int i = 0; i < AS_KB_KEY_MAX; i++) {
         g_atomic_int_set(&self->travel[i], 0);
+        self->travel_sequence[i] = 0;
     }
     as_job_run_for_device(off->path, analog_off_run, off, analog_off_free,
                           NULL, NULL, NULL);
@@ -875,6 +899,15 @@ int as_store_travel(AsStore *self, const char *path, int key)
         return 0;
     }
     return g_atomic_int_get(&self->travel[key]);
+}
+
+guint64 as_store_travel_sequence(AsStore *self, const char *path, int key)
+{
+    if (!self->analog_running || key < 0 || key >= AS_KB_KEY_MAX ||
+        strcmp(self->analog_path, path) != 0) {
+        return 0;
+    }
+    return self->travel_sequence[key];
 }
 
 /* ------------------------------- writes ------------------------------- */

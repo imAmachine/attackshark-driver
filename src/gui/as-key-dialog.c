@@ -115,6 +115,7 @@ typedef struct {
     GtkWidget *demo_area;
     AdwSwitchRow *demo_switch;
     int demo_key;           /* matrix position the demo follows */
+    guint64 demo_sequence[AS_KB_KEY_MAX];
     double switch_bottom;   /* travel of the selected switch type, mm */
     gboolean demo_active;
     gboolean demo_pressed;
@@ -859,19 +860,25 @@ static void on_analog(AsStore *store, gpointer data)
 {
     KeyDialog *d = data;
     int key = d->demo_key;
-    int deepest = as_store_travel(store, d->path, key);
-    gboolean following = deepest > 0;
+    guint64 newest = 0;
 
     if (!d->demo_active) {
         return;
     }
     for (size_t i = 0; i < G_N_ELEMENTS(keyboxes); i++) {
-        int depth = as_store_travel(store, d->path, keyboxes[i].pos);
-
-        if (!following && depth > deepest) {
-            deepest = depth;
-            key = keyboxes[i].pos;
+        int pos = keyboxes[i].pos;
+        if (pos < 0 || pos >= AS_KB_KEY_MAX) {
+            continue;
         }
+        int depth = as_store_travel(store, d->path, pos);
+        guint64 sequence = as_store_travel_sequence(store, d->path, pos);
+
+        if (sequence != d->demo_sequence[pos] && depth > 0 &&
+            sequence > newest) {
+            newest = sequence;
+            key = pos;
+        }
+        d->demo_sequence[pos] = sequence;
         set_class(d->buttons[i], "pressed", depth > 0);
     }
     if (key != d->demo_key) {
@@ -880,7 +887,8 @@ static void on_analog(AsStore *store, gpointer data)
         d->demo_extreme = 0.0;
         d->demo_key = key;
     }
-    demo_update(d, deepest / 1000.0, adw_switch_row_get_active(d->rt));
+    demo_update(d, as_store_travel(store, d->path, key) / 1000.0,
+                adw_switch_row_get_active(d->rt));
     gtk_widget_queue_draw(d->demo_area);
 }
 

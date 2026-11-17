@@ -118,10 +118,10 @@ static int mock_read(struct as_hid *hid, uint8_t *buf, size_t size, int timeout)
 
 static int mock_parse(const uint8_t *buf, size_t size, int32_t *values)
 {
-    if (!size) {
+    if (size < 5 || buf[0] != 0x05 || buf[1] != 0x1b) {
         return 0;
     }
-    values[4] = buf[size - 1];
+    values[buf[4]] = buf[2];
     return 1;
 }
 
@@ -180,8 +180,11 @@ static gboolean mouse_blocked(void)
 
 static void send_sample(AsStore *store, uint8_t value)
 {
+    uint8_t report[5] = { 0x05, 0x1b, value, 0, 4 };
     guint before = analog_signals;
-    g_assert_cmpint(write(sample_pipe[1], &value, 1), ==, 1);
+
+    g_assert_cmpint(write(sample_pipe[1], report, sizeof(report)), ==,
+                    (ssize_t)sizeof(report));
     WAIT_FOR(analog_signals > before);
     g_assert_cmpint(as_store_travel(store, "/mock/keyboard", 4), ==, value);
 }

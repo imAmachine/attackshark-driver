@@ -3,6 +3,23 @@
 #include "../src/gui/as-ui.c"
 
 static int sample_travel[AS_KB_KEY_MAX];
+static guint64 sample_sequence[AS_KB_KEY_MAX];
+static guint64 sample_counter;
+
+static void sample(int key, int depth)
+{
+    if (sample_travel[key] != depth) {
+        sample_travel[key] = depth;
+        sample_sequence[key] = ++sample_counter;
+    }
+}
+
+static guint64 mock_sequence(AsStore *store, const char *path, int key)
+{
+    (void)store;
+    (void)path;
+    return key >= 0 && key < AS_KB_KEY_MAX ? sample_sequence[key] : 0;
+}
 
 static int mock_travel(AsStore *store, const char *path, int key)
 {
@@ -12,7 +29,9 @@ static int mock_travel(AsStore *store, const char *path, int key)
 }
 
 #define as_store_travel mock_travel
+#define as_store_travel_sequence mock_sequence
 #include "../src/gui/as-key-dialog.c"
+#undef as_store_travel_sequence
 #undef as_store_travel
 
 static void test_read_validity(void)
@@ -150,35 +169,68 @@ static void test_slow_demo_tracking(void)
     for (int rapid = 0; rapid < 2; rapid++) {
         adw_switch_row_set_active(d.rt, rapid);
         memset(sample_travel, 0, sizeof(sample_travel));
+        memset(sample_sequence, 0, sizeof(sample_sequence));
+        memset(d.demo_sequence, 0, sizeof(d.demo_sequence));
         d.demo_key = active;
         d.demo_pressed = FALSE;
         d.demo_tracking = FALSE;
         for (int depth = 5; depth <= 2000; depth += 5) {
-            sample_travel[active] = depth;
+            sample(active, depth);
             on_analog(NULL, &d);
             g_assert_cmpint(d.demo_key, ==, active);
             g_assert_cmpfloat(demo_depth(&d), ==, depth / 1000.0);
         }
-        sample_travel[other] = 1500;
+        sample(other, 1500);
         for (int depth = 1995; depth >= 100; depth -= 5) {
-            sample_travel[active] = depth;
+            sample(active, depth);
             on_analog(NULL, &d);
             g_assert_cmpint(d.demo_key, ==, active);
             g_assert_cmpfloat(demo_depth(&d), ==, depth / 1000.0);
         }
         g_assert_false(d.demo_pressed);
         for (int depth = 105; depth <= 2000; depth += 5) {
-            sample_travel[active] = depth;
+            sample(active, depth);
             on_analog(NULL, &d);
             g_assert_cmpint(d.demo_key, ==, active);
             g_assert_cmpfloat(demo_depth(&d), ==, depth / 1000.0);
         }
         g_assert_true(d.demo_pressed);
-        sample_travel[active] = 0;
-        sample_travel[other] = 500;
+        sample(other, 1505);
+        on_analog(NULL, &d);
+        g_assert_cmpint(d.demo_key, ==, other);
+        g_assert_cmpfloat(demo_depth(&d), ==, 1.505);
+        sample(active, 1995);
+        on_analog(NULL, &d);
+        g_assert_cmpint(d.demo_key, ==, active);
+        sample(active, 0);
+        on_analog(NULL, &d);
+        g_assert_cmpint(d.demo_key, ==, active);
+        g_assert_cmpfloat(demo_depth(&d), ==, 0.0);
+        sample(other, 500);
         on_analog(NULL, &d);
         g_assert_cmpint(d.demo_key, ==, other);
         g_assert_cmpfloat(demo_depth(&d), ==, 0.5);
+        sample(active, 250);
+        on_analog(NULL, &d);
+        g_assert_cmpint(d.demo_key, ==, active);
+        sample(other, 500);
+        on_analog(NULL, &d);
+        g_assert_cmpint(d.demo_key, ==, active);
+        sample(active, 0);
+        on_analog(NULL, &d);
+        g_assert_cmpint(d.demo_key, ==, active);
+        g_assert_cmpfloat(demo_depth(&d), ==, 0.0);
+        on_analog(NULL, &d);
+        g_assert_cmpint(d.demo_key, ==, active);
+        sample(other, 505);
+        on_analog(NULL, &d);
+        g_assert_cmpint(d.demo_key, ==, other);
+        memset(sample_sequence, 0, sizeof(sample_sequence));
+        on_analog(NULL, &d);
+        sample(active, 5);
+        on_analog(NULL, &d);
+        g_assert_cmpint(d.demo_key, ==, active);
+
     }
     for (guint index = 0; index < G_N_ELEMENTS(keyboxes); index++) {
         g_object_unref(d.buttons[index]);
