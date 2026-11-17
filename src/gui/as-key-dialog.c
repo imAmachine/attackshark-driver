@@ -860,6 +860,7 @@ static void on_analog(AsStore *store, gpointer data)
     KeyDialog *d = data;
     int key = d->demo_key;
     int deepest = as_store_travel(store, d->path, key);
+    gboolean following = deepest > 0;
 
     if (!d->demo_active) {
         return;
@@ -867,7 +868,7 @@ static void on_analog(AsStore *store, gpointer data)
     for (size_t i = 0; i < G_N_ELEMENTS(keyboxes); i++) {
         int depth = as_store_travel(store, d->path, keyboxes[i].pos);
 
-        if (depth > deepest) {
+        if (!following && depth > deepest) {
             deepest = depth;
             key = keyboxes[i].pos;
         }

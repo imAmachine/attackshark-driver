@@ -1,7 +1,19 @@
 #include <glib.h>
 #include "as-store.h"
 #include "../src/gui/as-ui.c"
+
+static int sample_travel[AS_KB_KEY_MAX];
+
+static int mock_travel(AsStore *store, const char *path, int key)
+{
+    (void)store;
+    (void)path;
+    return key >= 0 && key < AS_KB_KEY_MAX ? sample_travel[key] : 0;
+}
+
+#define as_store_travel mock_travel
 #include "../src/gui/as-key-dialog.c"
+#undef as_store_travel
 
 static void test_read_validity(void)
 {
@@ -119,6 +131,62 @@ static void test_physical_key_feedback(void)
     g_object_unref(d.demo_area);
 }
 
+static void test_slow_demo_tracking(void)
+{
+    KeyDialog d = { .demo_active = TRUE, .demo_key = keyboxes[0].pos,
+                    .act = 1.0, .rel = 0.5, .rtp = 0.1,
+                    .rtr = 0.1, .dz = 0.05 };
+    int active = keyboxes[0].pos;
+    int other = keyboxes[1].pos;
+
+    d.demo_area = gtk_drawing_area_new();
+    d.rt = ADW_SWITCH_ROW(adw_switch_row_new());
+    g_object_ref_sink(d.demo_area);
+    g_object_ref_sink(d.rt);
+    for (guint index = 0; index < G_N_ELEMENTS(keyboxes); index++) {
+        d.buttons[index] = gtk_button_new();
+        g_object_ref_sink(d.buttons[index]);
+    }
+    for (int rapid = 0; rapid < 2; rapid++) {
+        adw_switch_row_set_active(d.rt, rapid);
+        memset(sample_travel, 0, sizeof(sample_travel));
+        d.demo_key = active;
+        d.demo_pressed = FALSE;
+        d.demo_tracking = FALSE;
+        for (int depth = 5; depth <= 2000; depth += 5) {
+            sample_travel[active] = depth;
+            on_analog(NULL, &d);
+            g_assert_cmpint(d.demo_key, ==, active);
+            g_assert_cmpfloat(demo_depth(&d), ==, depth / 1000.0);
+        }
+        sample_travel[other] = 1500;
+        for (int depth = 1995; depth >= 100; depth -= 5) {
+            sample_travel[active] = depth;
+            on_analog(NULL, &d);
+            g_assert_cmpint(d.demo_key, ==, active);
+            g_assert_cmpfloat(demo_depth(&d), ==, depth / 1000.0);
+        }
+        g_assert_false(d.demo_pressed);
+        for (int depth = 105; depth <= 2000; depth += 5) {
+            sample_travel[active] = depth;
+            on_analog(NULL, &d);
+            g_assert_cmpint(d.demo_key, ==, active);
+            g_assert_cmpfloat(demo_depth(&d), ==, depth / 1000.0);
+        }
+        g_assert_true(d.demo_pressed);
+        sample_travel[active] = 0;
+        sample_travel[other] = 500;
+        on_analog(NULL, &d);
+        g_assert_cmpint(d.demo_key, ==, other);
+        g_assert_cmpfloat(demo_depth(&d), ==, 0.5);
+    }
+    for (guint index = 0; index < G_N_ELEMENTS(keyboxes); index++) {
+        g_object_unref(d.buttons[index]);
+    }
+    g_object_unref(d.demo_area);
+    g_object_unref(d.rt);
+}
+
 static void test_slider_precision(void)
 {
     AsStore *store = as_store_get();
@@ -158,5 +226,6 @@ int main(int argc, char **argv)
     g_test_add_func("/gui/dialog/read-validity", test_read_validity);
     g_test_add_func("/gui/dialog/slider-precision", test_slider_precision);
     g_test_add_func("/gui/dialog/physical-key-feedback", test_physical_key_feedback);
+    g_test_add_func("/gui/dialog/slow-demo-tracking", test_slow_demo_tracking);
     return g_test_run();
 }
