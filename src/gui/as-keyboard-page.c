@@ -177,12 +177,26 @@ static void apply_snap(AsKeyboardPage *p, int disable)
     as_store_apply(p->page.store, p->page.path, &req);
 }
 
+static const AsOpRequest *pending_light(const AsKeyboardPage *p, int side)
+{
+    int op = side ? AS_OP_KB_SIDE_LIGHT : AS_OP_KB_LIGHT;
+
+    for (int i = 0; i < p->page.pending_count; i++) {
+        if (p->page.pending[i].op == op) {
+            return &p->page.pending[i];
+        }
+    }
+    return NULL;
+}
+
 static void apply_zone_power(AdwSwitchRow *row, GParamSpec *pspec,
                               gpointer data)
 {
     AsKeyboardPage *p = data;
     AsDevice *dev;
     int side = row == p->sw_side_light;
+    gboolean active = adw_switch_row_get_active(row);
+    const AsOpRequest *pending;
     AsOpRequest req = { .op = side ? AS_OP_KB_SIDE_LIGHT : AS_OP_KB_LIGHT_POWER };
 
     (void)pspec;
@@ -198,16 +212,23 @@ static void apply_zone_power(AdwSwitchRow *row, GParamSpec *pspec,
         req.light_speed = dev->side_light_speed;
         req.light_dazzle = dev->side_light_dazzle;
         memcpy(req.rgb, dev->side_rgb, sizeof(req.rgb));
-        req.light_mode = adw_switch_row_get_active(row)
-                             ? (dev->side_light_mode_saved > 0
-                                    ? dev->side_light_mode_saved
-                                    : dev->side_light_mode > 0
-                                      ? dev->side_light_mode
-                                      : 1)
+        pending = pending_light(p, 1);
+        if (pending) {
+            req = *pending;
+        }
+        req.light_mode = active
+                             ? (pending && pending->light_mode > 0
+                                    ? pending->light_mode
+                                    : dev->side_light_mode_saved > 0
+                                      ? dev->side_light_mode_saved
+                                      : dev->side_light_mode > 0
+                                        ? dev->side_light_mode
+                                        : 1)
                              : 0;
     } else {
-        req.light_on = !adw_switch_row_get_active(row);
+        req.light_on = !active;
     }
+    as_page_flush(&p->page);
     as_store_apply(p->page.store, p->page.path, &req);
 }
 
@@ -299,8 +320,8 @@ static void update_page(AsKeyboardPage *p)
     as_ui_combo_set(p->row_rate_combo, &p->page.updating,
                     as_ui_rate_to_index(dev->rate));
     gtk_widget_set_visible(GTK_WIDGET(p->light_group), dev->light_valid);
-    if (dev->light_valid) {
-        light_on = dev->light_on <= 0;
+    light_on = dev->light_on <= 0;
+    if (dev->light_valid && !pending_light(p, 0)) {
         as_ui_switch_set(p->sw_light, &p->page.updating, light_on);
         as_ui_combo_set(p->row_light_mode, &p->page.updating,
                         as_ui_light_index(p->light_modes, p->light_mode_count,
@@ -316,7 +337,7 @@ static void update_page(AsKeyboardPage *p)
         gtk_widget_set_sensitive(GTK_WIDGET(p->color), light_on);
     }
     gtk_widget_set_visible(GTK_WIDGET(p->side_light_group), dev->side_light_valid);
-    if (dev->side_light_valid) {
+    if (dev->side_light_valid && !pending_light(p, 1)) {
         side_on = dev->side_light_mode != 0;
         as_ui_switch_set(p->sw_side_light, &p->page.updating, side_on);
         as_ui_combo_set(p->row_side_mode, &p->page.updating,
@@ -358,7 +379,7 @@ static void update_page(AsKeyboardPage *p)
         }
         key1 = key1_selected(p);
         key2 = key2_selected(p);
-        mode = key1 >= 0 && key2 >= 0
+        mode = key1 >= 0 && key2 >= 0 && dev->key_pair[key1] == key2
                    ? as_kb_snap_mode_of(dev->key_option, dev->key_pair, key1)
                    : -1;
         snap_row_text(dev, key1, "не выбрана", p->snap_row1);
@@ -438,13 +459,12 @@ static gboolean on_snap_capture(GtkEventControllerKey *controller,
                                                         "as-second"));
     int pos;
 
-    (void)keycode;
     (void)state;
     if (!dev || p->key_count == 0) {
         return FALSE;
     }
     pos = key_pos_from_code(dev, p->key_positions, p->key_count,
-                            (int)as_ui_hid_from_keyval(keyval));
+                            (int)as_ui_hid_from_key(keyval, keycode));
     if (pos < 0) {
         return FALSE;
     }

@@ -133,6 +133,22 @@ int as_mouse_find_bluetooth(struct as_hid *out)
     return as_hid_find_first(is_bluetooth_mouse, out);
 }
 
+int as_mouse_open_path(struct as_mouse *m, const char *path)
+{
+    struct as_hid found[AS_HID_MAX];
+    int n = as_hid_scan(found, AS_HID_MAX);
+
+    memset(m, 0, sizeof(*m));
+    m->hid.fd = -1;
+    for (int i = 0; i < n; i++) {
+        if (!strcmp(found[i].path, path) && is_settings_mouse(&found[i])) {
+            m->hid = found[i];
+            return as_hid_open(&m->hid);
+        }
+    }
+    return -ENODEV;
+}
+
 int as_mouse_open(struct as_mouse *m)
 {
     int ret;
@@ -176,6 +192,9 @@ int as_mouse_handshake(struct as_mouse *m)
     if (ret < 0) {
         return ret;
     }
+    if (reply[1] != 0) {
+        return -EREMOTEIO;
+    }
     /* reply[9] = cid, reply[10] = mid, reply[11] = type. */
     m->cid = reply[9];
     m->mid = reply[10];
@@ -188,6 +207,9 @@ int as_mouse_raw(struct as_mouse *m, uint8_t cmd, unsigned addr,
 {
     uint8_t pkt[PACKET_LEN];
 
+    if (len > 10 || (len && !payload)) {
+        return -EINVAL;
+    }
     build_packet(pkt, cmd, addr, payload, len);
     return exchange(m, pkt, reply, 3);
 }
@@ -232,12 +254,18 @@ static int flash_io(struct as_mouse *m, uint8_t cmd, unsigned addr, uint8_t *buf
 int as_mouse_read_block(struct as_mouse *m, unsigned addr, uint8_t *buf,
                         unsigned len)
 {
+    if (addr > 0xffffu || len > 0x10000u - addr) {
+        return -EINVAL;
+    }
     return flash_io(m, AS_M_CMD_READ_FLASH, addr, buf, len);
 }
 
 int as_mouse_write_block(struct as_mouse *m, unsigned addr, const uint8_t *buf,
                          unsigned len)
 {
+    if (addr > 0xffffu || len > 0x10000u - addr) {
+        return -EINVAL;
+    }
     return flash_io(m, AS_M_CMD_WRITE_FLASH, addr, (uint8_t *)buf, len);
 }
 

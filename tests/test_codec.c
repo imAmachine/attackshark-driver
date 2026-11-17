@@ -186,6 +186,14 @@ static void test_analog(void)
 
 int main(void)
 {
+    assert(as_light_mode_by_name(" 1") == -1);
+    assert(as_light_mode_by_name("1junk") == -1);
+    assert(as_light_mode_by_name("4294967297") == -1);
+    assert(as_light_mode_by_name("999999999999999999999999") == -1);
+    assert(as_light_mode_by_name("-1") == -1);
+    assert(as_light_mode_by_name("256") == -1);
+    assert(as_light_mode_by_name("255") == 255);
+    assert(as_light_mode_by_name("wave") == 4);
     test_dpi();
     test_rates();
     test_travel();

@@ -1,56 +1,137 @@
 // SPDX-License-Identifier: MIT
+#define _GNU_SOURCE
 #include "internal.h"
 
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
+#include <pthread.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
-#include <sys/time.h>
+#include <sys/syscall.h>
+#include <time.h>
 #include <unistd.h>
 
 #define HIDIOCSFEATURE(len) _IOC(_IOC_READ | _IOC_WRITE, 'H', 0x06, len)
 #define HIDIOCGFEATURE(len) _IOC(_IOC_READ | _IOC_WRITE, 'H', 0x07, len)
 
-static volatile sig_atomic_t timed_out;
+static pthread_mutex_t timeout_lock = PTHREAD_MUTEX_INITIALIZER;
+static _Thread_local volatile sig_atomic_t timed_out;
 
-static void on_alarm(int sig)
+static void on_timeout(int sig, siginfo_t *info, void *context)
 {
     (void)sig;
-    timed_out = 1;
+    (void)context;
+    if (info->si_code == SI_TIMER &&
+        info->si_value.sival_ptr == (void *)&timed_out) {
+        timed_out = 1;
+    }
 }
 
-/* Run fn(arg) with a wall-clock limit; a blocking hidraw ioctl cannot be
- * interrupted any other way. */
 static int with_timeout(int timeout_ms, int (*fn)(void *), void *arg)
 {
     struct sigaction sa = { 0 }, old;
-    struct itimerval it = { { 0, 0 }, { 0, 0 } };
-    int ret;
+    struct sigevent event = { 0 };
+    struct itimerspec it = { 0 };
+    struct timespec zero = { 0 };
+    sigset_t pending, signal_set, old_mask;
+    timer_t timer;
+    int ret = -1, saved_errno, err, cancel_state, signo;
 
     if (timeout_ms <= 0) {
         return fn(arg);
     }
-    sa.sa_handler = on_alarm;
+    err = pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, &cancel_state);
+    if (err) {
+        errno = err;
+        return -1;
+    }
+    err = pthread_mutex_lock(&timeout_lock);
+    if (err) {
+        pthread_setcancelstate(cancel_state, NULL);
+        errno = err;
+        return -1;
+    }
+    saved_errno = EBUSY;
+    if (sigpending(&pending) < 0) {
+        saved_errno = errno;
+        goto unlock;
+    }
+    for (signo = SIGRTMAX; signo >= SIGRTMIN; signo--) {
+        if (sigaction(signo, NULL, &old) < 0) {
+            saved_errno = errno;
+            goto unlock;
+        }
+        if (old.sa_handler == SIG_DFL && !sigismember(&pending, signo)) {
+            break;
+        }
+    }
+    if (signo < SIGRTMIN) {
+        goto unlock;
+    }
+    sigemptyset(&signal_set);
+    sigaddset(&signal_set, signo);
+    err = pthread_sigmask(SIG_BLOCK, &signal_set, &old_mask);
+    if (err) {
+        saved_errno = err;
+        goto unlock;
+    }
+    sa.sa_sigaction = on_timeout;
+    sa.sa_flags = SA_SIGINFO;
     sigemptyset(&sa.sa_mask);
-    sigaction(SIGALRM, &sa, &old);
+    if (sigaction(signo, &sa, NULL) < 0) {
+        saved_errno = errno;
+        pthread_mutex_unlock(&timeout_lock);
+        goto restore_mask;
+    }
+    pthread_mutex_unlock(&timeout_lock);
+    event.sigev_notify = SIGEV_THREAD_ID;
+    event.sigev_signo = signo;
+    event.sigev_value.sival_ptr = (void *)&timed_out;
+    event._sigev_un._tid = (pid_t)syscall(SYS_gettid);
+    if (timer_create(CLOCK_MONOTONIC, &event, &timer) < 0) {
+        saved_errno = errno;
+        goto restore_handler;
+    }
     timed_out = 0;
     it.it_value.tv_sec = timeout_ms / 1000;
-    it.it_value.tv_usec = (timeout_ms % 1000) * 1000;
-    setitimer(ITIMER_REAL, &it, NULL);
-
-    ret = fn(arg);
-
-    memset(&it, 0, sizeof(it));
-    setitimer(ITIMER_REAL, &it, NULL);
-    sigaction(SIGALRM, &old, NULL);
-    if (ret < 0 && errno == EINTR && timed_out) {
-        errno = ETIMEDOUT;
+    it.it_value.tv_nsec = (timeout_ms % 1000) * 1000000L;
+    it.it_interval.tv_nsec = 1000000L;
+    if (timer_settime(timer, 0, &it, NULL) < 0) {
+        saved_errno = errno;
+        goto delete_timer;
     }
+    err = pthread_sigmask(SIG_UNBLOCK, &signal_set, NULL);
+    if (err) {
+        saved_errno = err;
+        goto delete_timer;
+    }
+    ret = fn(arg);
+    saved_errno = errno;
+    pthread_sigmask(SIG_BLOCK, &signal_set, NULL);
+    if (ret < 0 && saved_errno == EINTR && timed_out) {
+        saved_errno = ETIMEDOUT;
+    }
+delete_timer:
+    timer_delete(timer);
+    while (sigtimedwait(&signal_set, NULL, &zero) >= 0 || errno == EINTR) {
+    }
+restore_handler:
+    pthread_mutex_lock(&timeout_lock);
+    sigaction(signo, &old, NULL);
+    pthread_mutex_unlock(&timeout_lock);
+restore_mask:
+    pthread_sigmask(SIG_SETMASK, &old_mask, NULL);
+    goto done;
+unlock:
+    pthread_mutex_unlock(&timeout_lock);
+done:
+    pthread_setcancelstate(cancel_state, NULL);
+    errno = saved_errno;
     return ret;
 }
 

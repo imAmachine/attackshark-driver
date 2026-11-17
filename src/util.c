@@ -3,6 +3,7 @@
 #include "internal.h"
 
 #include <errno.h>
+#include <ctype.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -88,12 +89,13 @@ int as_light_mode_by_name(const char *name)
     char *end;
     long v;
 
-    if (!name) {
+    if (!name || !*name || isspace((unsigned char)*name)) {
         return -1;
     }
+    errno = 0;
     v = strtol(name, &end, 0);
     if (end != name && *end == 0) {
-        return (int)v;
+        return errno == 0 && v >= 0 && v <= 255 ? (int)v : -1;
     }
     for (size_t i = 0; i < AS_N(light_modes); i++) {
         if (strcmp(name, light_modes[i]) == 0) {

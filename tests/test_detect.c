@@ -3,6 +3,7 @@
  * carry the vendor settings collection. The Bluetooth report map below is the
  * one an R11 Ultra really publishes over HOGP (202 bytes, standard HID
  * collections only), so a Bluetooth link must be recognised without it. */
+#define _GNU_SOURCE
 #include "attackshark.h"
 
 #include <assert.h>
@@ -11,6 +12,123 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <fcntl.h>
+#include <spawn.h>
+#include <sys/stat.h>
+#include <sys/wait.h>
+
+static FILE *install_file;
+static int spawn_calls;
+static int spawn_error;
+static int wait_calls;
+static int wait_interrupts;
+static int wait_error;
+static int wait_status;
+static const char *open_path;
+
+static uid_t mock_geteuid(void)
+{
+    return 0;
+}
+
+static int mock_mkdir(const char *path, mode_t mode)
+{
+    assert(strcmp(path, "/etc/udev/rules.d") == 0);
+    assert(mode == 0755);
+    return 0;
+}
+
+static int mock_open(const char *path, int flags, ...)
+{
+    assert(strcmp(path, "/etc/udev/rules.d/70-attackshark.rules.tmp") == 0);
+    assert(flags == (O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC));
+    if (open_path) {
+        return open(open_path, flags, 0644);
+    }
+    assert(install_file != NULL);
+    return dup(fileno(install_file));
+}
+
+static int mock_rename(const char *oldpath, const char *newpath)
+{
+    assert(strcmp(oldpath, "/etc/udev/rules.d/70-attackshark.rules.tmp") == 0);
+    assert(strcmp(newpath, "/etc/udev/rules.d/70-attackshark.rules") == 0);
+    return 0;
+}
+
+static int mock_unlink(const char *path)
+{
+    assert(strcmp(path, "/etc/udev/rules.d/99-attackshark.rules") == 0);
+    return 0;
+}
+
+static int mock_posix_spawn(pid_t *pid, const char *path,
+                            const posix_spawn_file_actions_t *actions,
+                            const posix_spawnattr_t *attr,
+                            char *const argv[], char *const envp[])
+{
+    assert(strcmp(path, "/usr/bin/udevadm") == 0);
+    assert(actions == NULL);
+    assert(attr == NULL);
+    assert(envp != NULL);
+    assert(spawn_calls < 2);
+    assert(strcmp(argv[0], path) == 0);
+    assert(strcmp(argv[1], spawn_calls == 0 ? "control" : "trigger") == 0);
+    assert(strcmp(argv[2], spawn_calls == 0 ? "--reload-rules" :
+                                           "--subsystem-match=hidraw") == 0);
+    assert(argv[3] == NULL);
+    spawn_calls++;
+    if (spawn_error) {
+        errno = EINVAL;
+        return spawn_error;
+    }
+    *pid = 123;
+    return 0;
+}
+
+static pid_t mock_waitpid(pid_t pid, int *status, int options)
+{
+    assert(pid == 123);
+    assert(options == 0);
+    wait_calls++;
+    if (wait_interrupts > 0) {
+        wait_interrupts--;
+        errno = EINTR;
+        return -1;
+    }
+    if (wait_error) {
+        errno = wait_error;
+        return -1;
+    }
+    *status = wait_status;
+    return pid;
+}
+
+#define as_udev_rule_path mock_udev_rule_path
+#define as_udev_rule_text mock_udev_rule_text
+#define as_udev_rules_installed mock_udev_rules_installed
+#define as_udev_can_install mock_udev_can_install
+#define as_udev_install mock_udev_install
+#define geteuid mock_geteuid
+#define mkdir mock_mkdir
+#define open mock_open
+#define rename mock_rename
+#define unlink mock_unlink
+#define posix_spawn mock_posix_spawn
+#define waitpid mock_waitpid
+#include "../src/udev.c"
+#undef waitpid
+#undef posix_spawn
+#undef unlink
+#undef rename
+#undef open
+#undef mkdir
+#undef geteuid
+#undef as_udev_install
+#undef as_udev_can_install
+#undef as_udev_rules_installed
+#undef as_udev_rule_text
+#undef as_udev_rule_path
 
 /* Attack Shark R11 Ultra over Bluetooth (VID 3554, PID f533). */
 static const unsigned char bt_map[] = {
@@ -265,6 +383,127 @@ static void test_udev_install_null_err(void)
     printf("udev install without an error buffer ok\n");
 }
 
+static void test_udev_install_argv(void)
+{
+    char err[256];
+    char actual[4096];
+    char *expected = as_udev_rule_text();
+    size_t n;
+
+    assert(expected != NULL);
+    install_file = tmpfile();
+    assert(install_file != NULL);
+    spawn_calls = 0;
+    assert(mock_udev_install(err, sizeof(err)) == 0);
+    assert(err[0] == 0);
+    assert(spawn_calls == 2);
+    rewind(install_file);
+    n = fread(actual, 1, sizeof(actual) - 1, install_file);
+    actual[n] = 0;
+    assert(strcmp(actual, expected) == 0);
+    assert(fclose(install_file) == 0);
+    install_file = NULL;
+    free(expected);
+    printf("udev install spawned argv ok\n");
+}
+
+static void test_udev_rule_roundtrip(void)
+{
+    char dir[] = "/tmp/attackshark-rules-XXXXXX";
+    char path[256];
+    char *text = as_udev_rule_text();
+    FILE *f;
+
+    assert(text != NULL);
+    assert(mkdtemp(dir) != NULL);
+    snprintf(path, sizeof(path), "%s/%s", dir, RULE_FILE);
+    f = fopen(path, "w");
+    assert(f != NULL);
+    assert(fputs(text, f) >= 0);
+    assert(fclose(f) == 0);
+    assert(is_rules_file(dir, RULE_FILE));
+    snprintf(path, sizeof(path), "%s/60-renamed.rules", dir);
+    {
+        char original[256];
+        snprintf(original, sizeof(original), "%s/%s", dir, RULE_FILE);
+        assert(rename(original, path) == 0);
+    }
+    assert(is_rules_file(dir, "60-renamed.rules"));
+    {
+        char legacy[256];
+        snprintf(legacy, sizeof(legacy), "%s/%s", dir, LEGACY_RULE_FILE);
+        assert(rename(path, legacy) == 0);
+        assert(!is_rules_file(dir, LEGACY_RULE_FILE));
+        assert(unlink(legacy) == 0);
+    }
+    assert(rmdir(dir) == 0);
+    free(text);
+    printf("udev generated rule detection roundtrip ok\n");
+}
+
+static void test_udev_tool_errors(void)
+{
+    char *const argv[] = { "/usr/bin/udevadm", "control", "--reload-rules",
+                           NULL };
+
+    spawn_calls = 0;
+    wait_calls = 0;
+    spawn_error = ENOENT;
+    assert(run_tool(argv) == -ENOENT);
+    assert(wait_calls == 0);
+    spawn_error = EACCES;
+    spawn_calls = 0;
+    assert(run_tool(argv) == -EACCES);
+    assert(wait_calls == 0);
+    spawn_error = 0;
+    spawn_calls = 0;
+    wait_interrupts = 2;
+    assert(run_tool(argv) == 0);
+    assert(wait_calls == 3);
+    spawn_calls = 0;
+    wait_error = ECHILD;
+    assert(run_tool(argv) == -ECHILD);
+    wait_error = 0;
+    spawn_calls = 0;
+    wait_status = 1 << 8;
+    assert(run_tool(argv) == -EIO);
+    spawn_calls = 0;
+    wait_status = SIGTERM;
+    assert(run_tool(argv) == -EIO);
+    wait_status = 0;
+    printf("udev spawn and wait errors ok\n");
+}
+
+static void test_udev_stale_symlink(void)
+{
+    char dir[] = "/tmp/attackshark-symlink-XXXXXX";
+    char target[256], link[256], content[32], err[256];
+    FILE *f;
+
+    assert(mkdtemp(dir) != NULL);
+    snprintf(target, sizeof(target), "%s/target", dir);
+    snprintf(link, sizeof(link), "%s/rules.tmp", dir);
+    f = fopen(target, "w");
+    assert(f != NULL);
+    assert(fputs("preserve me", f) >= 0);
+    assert(fclose(f) == 0);
+    assert(symlink(target, link) == 0);
+    open_path = link;
+    spawn_calls = 0;
+    assert(mock_udev_install(err, sizeof(err)) == -EEXIST);
+    assert(spawn_calls == 0);
+    open_path = NULL;
+    f = fopen(target, "r");
+    assert(f != NULL);
+    assert(fgets(content, sizeof(content), f) != NULL);
+    assert(strcmp(content, "preserve me") == 0);
+    assert(fclose(f) == 0);
+    assert(unlink(link) == 0);
+    assert(unlink(target) == 0);
+    assert(rmdir(dir) == 0);
+    printf("udev stale temporary symlink rejected safely\n");
+}
+
 int main(void)
 {
     test_bluetooth_link();
@@ -278,6 +517,10 @@ int main(void)
     test_udev_rule_order();
     test_udev_rule_file();
     test_udev_install_null_err();
+    test_udev_install_argv();
+    test_udev_rule_roundtrip();
+    test_udev_tool_errors();
+    test_udev_stale_symlink();
     printf("all tests passed\n");
     return 0;
 }

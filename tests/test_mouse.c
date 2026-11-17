@@ -46,6 +46,8 @@ int mock_as_hid_read(struct as_hid *dev, uint8_t *buf, size_t len,
         return 17;
     } else if (scenario == 5 && cmd == AS_M_CMD_BATTERY) {
         status = 1;
+    } else if (scenario == 6 && cmd == AS_M_CMD_HANDSHAKE) {
+        status = 1;
     } else if (scenario == 5) {
     }
 
@@ -132,6 +134,30 @@ static void test_non_flash_status1_is_ignored(void)
     assert(reply[1] == 1);
 }
 
+static void test_bounds_and_raw_len(void)
+{
+    struct as_mouse m = { 0 };
+    uint8_t data[20] = { 0 };
+    uint8_t reply[16];
+
+    reset_test(0);
+    assert(as_mouse_read_block(&m, 0x10000, data, 0) == -EINVAL);
+    assert(as_mouse_read_block(&m, 0xffff, data, 2) == -EINVAL);
+    assert(as_mouse_write_block(&m, 0xfffe, data, 3) == -EINVAL);
+    assert(as_mouse_raw(&m, AS_M_CMD_VERSION, 0, data, 11, reply) == -EINVAL);
+    assert(as_mouse_raw(&m, AS_M_CMD_VERSION, 0, NULL, 1, reply) == -EINVAL);
+    assert(writes == 0);
+}
+
+static void test_handshake_refusal(void)
+{
+    struct as_mouse m = { 0 };
+
+    reset_test(6);
+    assert(as_mouse_handshake(&m) == -EREMOTEIO);
+    assert(writes == 1);
+}
+
 static void test_battery_status1_is_not_parsed(void)
 {
     struct as_mouse m = { 0 };
@@ -151,5 +177,7 @@ int main(void)
     test_setters_propagate_status();
     test_non_flash_status1_is_ignored();
     test_battery_status1_is_not_parsed();
+    test_bounds_and_raw_len();
+    test_handshake_refusal();
     return 0;
 }

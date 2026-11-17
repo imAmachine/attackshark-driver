@@ -4,6 +4,8 @@ CFLAGS     ?= -O2 -g -Wall -Wextra
 CPPFLAGS   += -Iinclude
 LDFLAGS    ?=
 LDLIBS     ?=
+CFLAGS     += -pthread
+LDLIBS     += -pthread -lrt
 AR         ?= ar
 
 # Driver core shared by the CLI and the GUI.
@@ -97,37 +99,66 @@ uninstall:
 	rm -f $(DESTDIR)$(POLKITDIR)/org.attackshark.permissions.policy
 
 tests/test_codec: tests/test_codec.c $(LIB)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ tests/test_codec.c $(LIB) -lm
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) -o $@ tests/test_codec.c $(LIB) $(LDLIBS) -lm
 
 tests/test_detect: tests/test_detect.c $(LIB)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ tests/test_detect.c $(LIB) -lm
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) -o $@ tests/test_detect.c $(LIB) $(LDLIBS) -lm
 
 tests/test_cli: tests/test_cli.c src/main.c $(LIB)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $< $(LIB) -lm
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) -o $@ $< $(LIB) $(LDLIBS) -lm
 
 tests/test_mouse: tests/test_mouse.c src/mouse.c $(LIB)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $< $(LIB) -lm
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) -o $@ $< $(LIB) $(LDLIBS) -lm
 
 tests/test_keyboard: tests/test_keyboard.c src/keyboard.c $(LIB)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $< $(LIB) -lm
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) -o $@ $< $(LIB) $(LDLIBS) -lm
 
-test: tests/test_codec tests/test_detect tests/test_cli tests/test_mouse tests/test_keyboard
+tests/test_transport: tests/test_transport.c src/hidraw.c $(LIB)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) -o $@ $< $(LIB) $(LDLIBS) -lm
+
+test: tests/test_codec tests/test_detect tests/test_cli tests/test_mouse tests/test_keyboard tests/test_transport
 	./tests/test_codec
 	./tests/test_detect
 	./tests/test_cli
 	./tests/test_mouse
 	./tests/test_keyboard
+	./tests/test_transport
 
 tests/test_gui_ui: tests/test_gui_ui.c $(GUI_SRC) $(wildcard src/gui/*.h) $(LIB)
-	$(CC) $(CPPFLAGS) -Isrc/gui $(GUI_CFLAGS) $(CFLAGS) -o $@ tests/test_gui_ui.c \
-		src/gui/as-store.c src/gui/as-worker.c $(LIB) $(GUI_LIBS) -lm
+	$(CC) $(CPPFLAGS) -Isrc/gui $(GUI_CFLAGS) $(CFLAGS) $(LDFLAGS) -o $@ tests/test_gui_ui.c \
+		src/gui/as-store.c src/gui/as-worker.c $(LIB) $(GUI_LIBS) $(LDLIBS) -lm
 
-test-ui: tests/test_gui_ui
+GUI_SAFE_TEST_SRC := $(wildcard tests/test_gui_store_mock.c tests/test_gui_store_state.c tests/test_gui_dialog.c tests/test_gui_pages.c tests/test_gui_window.c tests/test_gui_worker.c tests/test_gui_store_threads.c)
+GUI_SAFE_TESTS := $(GUI_SAFE_TEST_SRC:.c=)
+
+tests/test_gui_store_mock: tests/test_gui_store_mock.c tests/test_gui_store.c $(GUI_SRC) $(wildcard src/gui/*.h)
+	$(CC) $(CPPFLAGS) -Isrc/gui $(GUI_CFLAGS) $(CFLAGS) $(LDFLAGS) -o $@ $< $(GUI_LIBS) $(LDLIBS) -lm
+
+tests/test_gui_store_state: tests/test_gui_store_state.c $(GUI_SRC) $(wildcard src/gui/*.h) $(LIB)
+	$(CC) $(CPPFLAGS) -Isrc/gui $(GUI_CFLAGS) $(CFLAGS) $(LDFLAGS) -o $@ $< $(LIB) $(GUI_LIBS) $(LDLIBS) -lm
+
+tests/test_gui_dialog: tests/test_gui_dialog.c $(GUI_SRC) $(wildcard src/gui/*.h) $(LIB)
+	$(CC) $(CPPFLAGS) -Isrc/gui $(GUI_CFLAGS) $(CFLAGS) $(LDFLAGS) -o $@ $< src/gui/as-store.c src/gui/as-worker.c $(LIB) $(GUI_LIBS) $(LDLIBS) -lm
+
+tests/test_gui_pages: tests/test_gui_pages.c $(GUI_SRC) $(wildcard src/gui/*.h) $(LIB)
+	$(CC) $(CPPFLAGS) -Isrc/gui $(GUI_CFLAGS) $(CFLAGS) $(LDFLAGS) -o $@ $< src/gui/as-ui.c $(LIB) $(GUI_LIBS) $(LDLIBS) -lm
+
+tests/test_gui_window: tests/test_gui_window.c $(GUI_SRC) $(wildcard src/gui/*.h)
+	$(CC) $(CPPFLAGS) -Isrc/gui $(GUI_CFLAGS) $(CFLAGS) -ffunction-sections -fdata-sections $(LDFLAGS) -Wl,--gc-sections -o $@ $< $(GUI_LIBS) $(LDLIBS) -lm
+
+tests/test_gui_store_threads: tests/test_gui_store_threads.c $(GUI_SRC) $(wildcard src/gui/*.h) $(LIB)
+	$(CC) $(CPPFLAGS) -Isrc/gui $(GUI_CFLAGS) $(CFLAGS) $(LDFLAGS) -o $@ $< src/gui/as-worker.c $(LIB) $(GUI_LIBS) $(LDLIBS) -lm
+
+tests/test_gui_worker: tests/test_gui_worker.c src/gui/as-worker.c src/gui/as-worker.h
+	$(CC) $(CPPFLAGS) -Isrc/gui $(GUI_CFLAGS) $(CFLAGS) $(LDFLAGS) -o $@ $< src/gui/as-worker.c $(GUI_LIBS) $(LDLIBS)
+
+test-ui: tests/test_gui_ui $(GUI_SAFE_TESTS)
 	GSK_RENDERER=cairo ./tests/test_gui_ui
+	@set -e; for test in $(GUI_SAFE_TESTS); do GSK_RENDERER=cairo ./$$test; done
 
 tests/test_gui_store: $(STORE_TEST_SRC) $(wildcard src/gui/*.h) $(LIB)
-	$(CC) $(CPPFLAGS) -Isrc/gui $(GUI_CFLAGS) $(CFLAGS) -o $@ $(STORE_TEST_SRC) \
-		$(LIB) $(GUI_LIBS) -lm
+	$(CC) $(CPPFLAGS) -Isrc/gui $(GUI_CFLAGS) $(CFLAGS) $(LDFLAGS) -o $@ $(STORE_TEST_SRC) \
+		$(LIB) $(GUI_LIBS) $(LDLIBS) -lm
 
 # Needs a connected mouse or keyboard: exercises enumeration and a write.
 test-store: tests/test_gui_store
@@ -140,7 +171,7 @@ check: test $(BIN)
 compiledb:
 	@printf '[\n' > compile_commands.json
 	@set -e; first=1; \
-	for f in $(LIB_SRC) $(BIN_SRC) $(GUI_SRC) $(STORE_TEST_SRC) tests/test_detect.c tests/test_cli.c tests/test_mouse.c tests/test_keyboard.c tests/test_gui_ui.c; do \
+	for f in $(LIB_SRC) $(BIN_SRC) $(GUI_SRC) $(STORE_TEST_SRC) tests/test_detect.c tests/test_cli.c tests/test_mouse.c tests/test_keyboard.c tests/test_gui_ui.c tests/test_transport.c $(GUI_SAFE_TEST_SRC); do \
 		case $$f in src/gui/*) extra="$(GUI_CFLAGS)";; \
 			tests/*) extra="-Isrc/gui $(GUI_CFLAGS)";; *) extra="";; esac; \
 		[ $$first = 1 ] || printf ',\n' >> compile_commands.json; \
@@ -153,4 +184,4 @@ compiledb:
 clean:
 	rm -f $(LIB_OBJ) src/main.o src/gui/*.o tests/*.o $(LIB) $(BIN) $(GUI) \
 		tests/test_codec tests/test_detect tests/test_gui_store tests/test_cli \
-		tests/test_mouse tests/test_keyboard tests/test_gui_ui
+		tests/test_mouse tests/test_keyboard tests/test_gui_ui tests/test_transport $(GUI_SAFE_TESTS)

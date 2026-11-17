@@ -24,6 +24,8 @@ typedef struct {
     char *selected;
     int prefer_kind;   /* AS_DEVICE_* to preselect, or -1 */
     guint refresh_id;
+    GCancellable *fix_cancel;
+    gboolean closed;
     gboolean fixing;        /* an install attempt is running */
     gboolean auto_fixed;    /* the silent root path was already tried */
 } AsWindow;
@@ -200,13 +202,23 @@ static void show_toast(AsWindow *w, const char *message)
 static void on_fix_helper_done(GObject *source, GAsyncResult *res,
                                gpointer data)
 {
-    AsWindow *w = data;
+    GWeakRef *ref = data;
+    GtkWindow *window = g_weak_ref_get(ref);
+    AsWindow *w = window ? window_of(window) : NULL;
     char *out = NULL, *errtext = NULL;
     GError *error = NULL;
+    gboolean success;
 
+    g_weak_ref_clear(ref);
+    g_free(ref);
+    success = g_subprocess_communicate_utf8_finish(G_SUBPROCESS(source), res,
+                                                  &out, &errtext, &error);
+    if (!w || w->closed || !gtk_window_get_application(window)) {
+        goto done;
+    }
+    g_clear_object(&w->fix_cancel);
     w->fixing = FALSE;
-    if (!g_subprocess_communicate_utf8_finish(G_SUBPROCESS(source), res, &out,
-                                              &errtext, &error)) {
+    if (!success) {
         show_toast(w, error->message);
         g_clear_error(&error);
     } else if (!g_subprocess_get_successful(G_SUBPROCESS(source))) {
@@ -218,8 +230,11 @@ static void on_fix_helper_done(GObject *source, GAsyncResult *res,
         show_toast(w, "Правила udev установлены");
         as_store_scan(w->store);
     }
+done:
+    g_clear_error(&error);
     g_free(out);
     g_free(errtext);
+    g_clear_object(&window);
 }
 
 static void on_fix_clicked(AdwBanner *banner, gpointer window)
@@ -257,8 +272,13 @@ static void on_fix_clicked(AdwBanner *banner, gpointer window)
         g_clear_error(&error);
         return;
     }
+    GWeakRef *ref = g_new0(GWeakRef, 1);
+
+    g_weak_ref_init(ref, window);
     w->fixing = TRUE;
-    g_subprocess_communicate_utf8_async(proc, NULL, NULL, on_fix_helper_done, w);
+    w->fix_cancel = g_cancellable_new();
+    g_subprocess_communicate_utf8_async(proc, NULL, w->fix_cancel,
+                                       on_fix_helper_done, ref);
     g_object_unref(proc);
 }
 
@@ -353,13 +373,35 @@ static void on_window_map(GtkWidget *widget, gpointer data)
     }
 }
 
+static void window_stop(AsWindow *w)
+{
+    w->closed = TRUE;
+    if (w->refresh_id) {
+        g_source_remove(w->refresh_id);
+        w->refresh_id = 0;
+    }
+    if (w->fix_cancel) {
+        g_cancellable_cancel(w->fix_cancel);
+        g_clear_object(&w->fix_cancel);
+    }
+    g_signal_handlers_disconnect_by_data(w->store, w->window);
+}
+
+static void on_window_application_changed(GObject *window, GParamSpec *pspec,
+                                           gpointer data)
+{
+    (void)pspec;
+    (void)data;
+    if (!gtk_window_get_application(GTK_WINDOW(window))) {
+        window_stop(window_of(window));
+    }
+}
+
 static void window_free(gpointer data)
 {
     AsWindow *w = data;
 
-    if (w->refresh_id) {
-        g_source_remove(w->refresh_id);
-    }
+    window_stop(w);
     g_hash_table_destroy(w->rows);
     g_hash_table_destroy(w->pages);
     g_free(w->selected);
@@ -464,6 +506,8 @@ GtkWidget *as_window_new(GtkApplication *app)
     window = adw_application_window_new(app);
     w->window = window;
     g_object_set_data_full(G_OBJECT(window), "as-window", w, window_free);
+    g_signal_connect(window, "notify::application",
+                     G_CALLBACK(on_window_application_changed), NULL);
     gtk_window_set_title(GTK_WINDOW(window), "Attack Shark");
     gtk_window_set_default_size(GTK_WINDOW(window), 980, 720);
 

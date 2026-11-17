@@ -152,11 +152,25 @@ static gboolean group_contains(int group, unsigned code)
 
 static void load_values(KeyDialog *d);
 static void refresh_key_styles(KeyDialog *d);
+static void update_status(KeyDialog *d);
+static int selection_count(const KeyDialog *d);
+
+static gboolean device_ready(const AsDevice *dev)
+{
+    return dev && !dev->permission_denied && dev->key_travel_valid;
+}
+
+static gboolean can_apply(KeyDialog *d)
+{
+    return device_ready(as_store_lookup(d->store, d->path)) &&
+           !d->pending_request;
+}
 
 static void refresh_from_device(KeyDialog *d)
 {
     AsDevice *dev = as_store_lookup(d->store, d->path);
 
+    update_status(d);
     if (!dev) {
         return;
     }
@@ -170,12 +184,9 @@ static void refresh_from_device(KeyDialog *d)
 static void on_store_changed(AsStore *store, gpointer data)
 {
     KeyDialog *d = data;
-    AsDevice *dev = as_store_lookup(store, d->path);
 
     (void)store;
-    if (dev && as_ui_device_signature(dev) != d->signature) {
-        refresh_from_device(d);
-    }
+    refresh_from_device(d);
 }
 
 /* A failed write shows up as a toast behind this modal window, so the reason
@@ -189,6 +200,8 @@ static void on_store_error(AsStore *store, const char *path,
     if (path && g_strcmp0(path, d->path) != 0) {
         return;
     }
+    gtk_widget_set_sensitive(d->apply,
+                             selection_count(d) > 0 && can_apply(d));
     gtk_label_set_text(GTK_LABEL(d->status), message);
 }
 
@@ -316,7 +329,7 @@ static void refresh_key_styles(KeyDialog *d)
     AsDevice *dev = as_store_lookup(d->store, d->path);
     double bulk_act, bulk_rel;
 
-    if (!dev) {
+    if (!device_ready(dev)) {
         return;
     }
     bulk_act = bulk_travel(dev, 0);
@@ -342,7 +355,7 @@ static void load_values(KeyDialog *d)
     int key = first_selected(d);
     gboolean previous;
 
-    if (!dev || key < 0) {
+    if (!device_ready(dev) || key < 0) {
         return;
     }
     previous = d->updating;
@@ -362,16 +375,22 @@ static void refresh_group_buttons(KeyDialog *d);
 
 static void update_status(KeyDialog *d)
 {
-    char buf[64];
+    char buf[160];
     int n = selection_count(d);
+    AsDevice *dev = as_store_lookup(d->store, d->path);
 
-    if (d->pending_request) {
+    if (!dev || dev->permission_denied) {
+        g_strlcpy(buf, "Устройство недоступно", sizeof(buf));
+    } else if (!dev->key_travel_valid) {
+        g_strlcpy(buf, dev->error[0] ? dev->error :
+                  "Настройки хода клавиш недоступны", sizeof(buf));
+    } else if (d->pending_request) {
         snprintf(buf, sizeof(buf), "Применение к клавишам: %d…", d->pending_count);
     } else {
         snprintf(buf, sizeof(buf), "Выбрано клавиш: %d", n);
     }
     gtk_label_set_text(GTK_LABEL(d->status), buf);
-    gtk_widget_set_sensitive(d->apply, n > 0 && !d->pending_request);
+    gtk_widget_set_sensitive(d->apply, n > 0 && can_apply(d));
     refresh_group_buttons(d);
 }
 
@@ -484,13 +503,21 @@ static void on_operation_completed(AsStore *store, const char *path, int op,
         return;
     }
     d->pending_request = 0;
-    gtk_widget_set_sensitive(d->apply, selection_count(d) > 0);
+    gtk_widget_set_sensitive(d->apply,
+                             selection_count(d) > 0 && can_apply(d));
     if (!success) {
         d->edited = TRUE;
+        if (!device_ready(as_store_lookup(d->store, d->path))) {
+            update_status(d);
+        }
         return;
     }
-    d->edited = d->edited_while_pending;
+    d->edited = d->edited_while_pending ||
+                !device_ready(as_store_lookup(d->store, d->path));
     refresh_from_device(d);
+    if (!device_ready(as_store_lookup(d->store, d->path))) {
+        return;
+    }
     snprintf(buf, sizeof(buf), "Применено к клавишам: %d%s", d->pending_count,
              d->edited ? "; есть новые изменения" : "");
     gtk_label_set_text(GTK_LABEL(d->status), buf);
@@ -512,7 +539,8 @@ static void on_apply(GtkButton *button, gpointer data)
     gboolean restart = d->demo_active;
 
     (void)button;
-    if (d->pending_request || selection_count(d) == 0) {
+    if (!can_apply(d) || selection_count(d) == 0) {
+        update_status(d);
         return;
     }
     req.request_id = ++next_request_id;
@@ -527,6 +555,7 @@ static void on_apply(GtkButton *button, gpointer data)
         if (restart) {
             as_store_analog_start(d->store, d->path);
         }
+        gtk_widget_set_sensitive(d->apply, FALSE);
         gtk_label_set_text(GTK_LABEL(d->status), "Устройство недоступно");
         return;
     }
@@ -619,7 +648,11 @@ static AdwActionRow *make_slider(AdwPreferencesGroup *group, const char *title,
                                  double min, double max, double *out,
                                  double value, KeyDialog *d)
 {
-    AdwActionRow *row = as_ui_slider_row(title, min, max, 0.05, value, out,
+    AsDevice *dev = as_store_lookup(d->store, d->path);
+    double step = !dev || !dev->usb_version_valid ? 0.005 :
+                  dev->usb_version >= 1280 ? 0.005 :
+                  dev->usb_version >= 768 ? 0.01 : 0.1;
+    AdwActionRow *row = as_ui_slider_row(title, min, max, step, value, out,
                                          on_slider_changed, d);
 
     adw_preferences_group_add(group, GTK_WIDGET(row));
@@ -670,11 +703,10 @@ static gboolean on_test_pressed(GtkEventControllerKey *controller,
                                 GdkModifierType state, gpointer data)
 {
     KeyDialog *d = data;
-    unsigned code = as_ui_hid_from_keyval(keyval);
+    unsigned code = as_ui_hid_from_key(keyval, keycode);
     GtkWidget *button = button_for_code(d, code);
 
     (void)controller;
-    (void)keycode;
     (void)state;
     if (button) {
         gtk_widget_add_css_class(button, "pressed");
@@ -688,10 +720,9 @@ static void on_test_released(GtkEventControllerKey *controller, guint keyval,
                              gpointer data)
 {
     KeyDialog *d = data;
-    GtkWidget *button = button_for_code(d, as_ui_hid_from_keyval(keyval));
+    GtkWidget *button = button_for_code(d, as_ui_hid_from_key(keyval, keycode));
 
     (void)controller;
-    (void)keycode;
     (void)state;
     if (button) {
         gtk_widget_remove_css_class(button, "pressed");

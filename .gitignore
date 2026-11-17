@@ -9,6 +9,14 @@ tests/test_gui_ui
 tests/test_cli
 tests/test_mouse
 tests/test_keyboard
+tests/test_transport
+tests/test_gui_dialog
+tests/test_gui_pages
+tests/test_gui_store_mock
+tests/test_gui_store_state
+tests/test_gui_window
+tests/test_gui_worker
+tests/test_gui_store_threads
 compile_commands.json
 ref/
 .cache/

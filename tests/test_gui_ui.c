@@ -108,6 +108,7 @@ static void test_dirty_refresh(void)
     }
     dev = g_new0(AsDevice, 1);
     g_strlcpy(dev->path, "/nonexistent/gui-widget-test", sizeof(dev->path));
+    dev->key_travel_valid = TRUE;
     dev->key_actuation[key] = 1.0;
     g_ptr_array_add(as_store_devices(store), dev);
     as_key_dialog_open(NULL, store, dev->path);
@@ -233,6 +234,8 @@ static void test_completion(void)
     AsStore *store = as_store_get();
     AsDevice *dev = g_new0(AsDevice, 1);
     AsOpRequest req = { .op = AS_OP_KB_KEYS_TRAVEL, .request_id = 42 };
+
+    dev->kind = AS_DEVICE_KEYBOARD;
     Completion result = { 0 };
     gint64 deadline = g_get_monotonic_time() + 5 * G_TIME_SPAN_SECOND;
 
@@ -257,9 +260,53 @@ static void test_completion(void)
     g_ptr_array_set_size(as_store_devices(store), 0);
 }
 
+typedef struct {
+    GThread *main_thread;
+    gint finished;
+    gboolean completed;
+} WorkerResult;
+
+static void worker_job(gpointer data, GError **error)
+{
+    WorkerResult *result = data;
+
+    (void)error;
+    g_atomic_int_set(&result->finished, 1);
+}
+
+static void worker_done(gpointer data, GError *error, gpointer user_data)
+{
+    WorkerResult *result = data;
+
+    (void)user_data;
+    g_assert_null(error);
+    g_assert_true(g_thread_self() == result->main_thread);
+    result->completed = TRUE;
+}
+
+static void test_worker_completion_thread(void)
+{
+    WorkerResult result = { .main_thread = g_thread_self() };
+    gint64 deadline = g_get_monotonic_time() + 5 * G_TIME_SPAN_SECOND;
+
+    as_worker_start();
+    as_job_run(worker_job, &result, NULL, worker_done, NULL, NULL);
+    while (!g_atomic_int_get(&result.finished) &&
+           g_get_monotonic_time() < deadline) {
+        g_usleep(1000);
+    }
+    as_worker_stop();
+    g_assert_cmpint(g_atomic_int_get(&result.finished), ==, 1);
+    g_assert_false(result.completed);
+    while (g_main_context_iteration(NULL, FALSE)) {
+    }
+    g_assert_true(result.completed);
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
+    g_test_add_func("/gui/worker/completion-thread", test_worker_completion_thread);
     have_display = gtk_init_check();
     g_test_add_func("/gui/dialog/stale-completion", test_stale_completion);
     g_test_add_func("/gui/dialog/dirty-refresh", test_dirty_refresh);

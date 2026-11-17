@@ -53,6 +53,8 @@ static void apply_dpi(AdwSpinRow *row, GParamSpec *pspec, gpointer data)
     if (value != (unsigned)adw_spin_row_get_value(row)) {
         as_ui_spin_set(row, &p->page.updating, value);
     }
+    gtk_adjustment_set_step_increment(adw_spin_row_get_adjustment(row),
+                                      value >= 30100 ? 100 : 50);
     req = (AsOpRequest){
         .op = AS_OP_MOUSE_DPI_STAGE,
         .index = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(row), "as-stage")),
@@ -156,6 +158,9 @@ static void update_page(AsMousePage *p)
         gtk_widget_set_visible(GTK_WIDGET(p->row_dpi[i]), active);
         if (active) {
             as_ui_spin_set(p->row_dpi[i], &p->page.updating, dev->dpi[i]);
+            gtk_adjustment_set_step_increment(
+                adw_spin_row_get_adjustment(p->row_dpi[i]),
+                dev->dpi[i] >= 30100 ? 100 : 50);
             adw_preferences_row_set_title(ADW_PREFERENCES_ROW(p->row_dpi[i]),
                                           i == dev->active_stage
                                               ? "Активный этап DPI"

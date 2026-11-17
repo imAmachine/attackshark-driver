@@ -131,6 +131,7 @@ struct as_mouse_state {
 };
 
 int as_mouse_open(struct as_mouse *m);
+int as_mouse_open_path(struct as_mouse *m, const char *path);
 void as_mouse_close(struct as_mouse *m);
 /* Fills out with a Bluetooth link of the mouse family, which the firmware
  * exposes without the vendor collection. Returns 1 when such a link exists,
@@ -258,6 +259,7 @@ struct as_kb_state {
 };
 
 int as_keyboard_open(struct as_keyboard *kb);
+int as_keyboard_open_path(struct as_keyboard *kb, const char *path);
 void as_keyboard_close(struct as_keyboard *kb);
 /* Fills out with a Bluetooth link of the keyboard family, which carries no
  * vendor collection. Returns 1 when such a link exists, so callers can say why

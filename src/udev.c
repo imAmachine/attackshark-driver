@@ -137,7 +137,7 @@ static int is_rules_file(const char *dir, const char *name)
     n = fread(buf, 1, sizeof(buf) - 1, f);
     fclose(f);
     buf[n] = 0;
-    return strstr(buf, "SUBSYSTEM=\"hidraw\"") != NULL &&
+    return strstr(buf, "SUBSYSTEM==\"hidraw\"") != NULL &&
            strstr(buf, "ATTRS{id/vendor}==\"3151\"") != NULL &&
            strstr(buf, "ATTRS{id/vendor}==\"3554\"") != NULL &&
            strstr(buf, RULE_MARKER) != NULL;
@@ -198,7 +198,7 @@ static int write_rules(const char *text, char *err, size_t errlen)
         return -errno;
     }
     snprintf(tmp, sizeof(tmp), "%s.tmp", RULE_PATH);
-    fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+    fd = open(tmp, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0644);
     if (fd < 0) {
         if (err && errlen) {
             snprintf(err, errlen, "cannot write %s: %s", tmp,
@@ -242,9 +242,9 @@ static int run_tool(char *const argv[])
 
 int as_udev_install(char *err, size_t errlen)
 {
-    char *const reload[] = { "/usr/bin/udevadm", "udevadm", "control",
-                             "--reload-rules", NULL };
-    char *const trigger[] = { "/usr/bin/udevadm", "udevadm", "trigger",
+    char *const reload[] = { "/usr/bin/udevadm", "control", "--reload-rules",
+                             NULL };
+    char *const trigger[] = { "/usr/bin/udevadm", "trigger",
                               "--subsystem-match=hidraw", NULL };
     char *text;
     int rc;

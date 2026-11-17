@@ -57,6 +57,23 @@ int as_keyboard_find_bluetooth(struct as_hid *out)
     return as_hid_find_first(is_bluetooth_keyboard, out);
 }
 
+int as_keyboard_open_path(struct as_keyboard *kb, const char *path)
+{
+    struct as_hid found[AS_HID_MAX];
+    int n = as_hid_scan(found, AS_HID_MAX);
+
+    memset(kb, 0, sizeof(*kb));
+    kb->hid.fd = -1;
+    kb->analog.fd = -1;
+    for (int i = 0; i < n; i++) {
+        if (!strcmp(found[i].path, path) && is_settings_keyboard(&found[i])) {
+            kb->hid = found[i];
+            return as_hid_open(&kb->hid);
+        }
+    }
+    return -ENODEV;
+}
+
 int as_keyboard_open(struct as_keyboard *kb)
 {
     int ret;
@@ -324,9 +341,13 @@ static int is_echo(const uint8_t *out, int param, int page)
 int as_keyboard_get_param(struct as_keyboard *kb, int param, int32_t *values,
                           size_t count)
 {
-    int width = param_width(kb, param);
+    int width;
     size_t per_page, pages;
 
+    if (count > AS_KB_KEY_MAX || (count && !values)) {
+        return -EINVAL;
+    }
+    width = param_width(kb, param);
     if (width < 0) {
         return width;
     }
@@ -354,19 +375,14 @@ int as_keyboard_get_param(struct as_keyboard *kb, int param, int32_t *values,
             usleep(VERIFY_RETRY_US);
         }
         if (is_echo(out, param, (int)page)) {
-            /* The page does not exist or the device stayed silent: treat it
-             * as zeroes like the vendor driver does. A travel write is
-             * verified separately, so silence cannot pass for a stored
-             * value. */
-            memset(values + offset, 0, n * sizeof(values[0]));
-            continue;
+            return -ENODATA;
         }
         for (size_t i = 0; i < n; i++) {
             const uint8_t *p = out + i * (size_t)width;
             int32_t v = 0;
 
             for (int b = 0; b < width; b++) {
-                v |= (int32_t)p[b] << (8 * b);
+                v |= (int32_t)((uint32_t)p[b] << (8 * b));
             }
             values[offset + i] = v;
         }
@@ -410,9 +426,13 @@ static int param_matches(struct as_keyboard *kb, int param,
 int as_keyboard_set_param(struct as_keyboard *kb, int param,
                           const int32_t *values, size_t count, int save)
 {
-    int width = param_width(kb, param);
+    int width;
     size_t per_page, pages;
 
+    if (count > AS_KB_KEY_MAX || (count && !values)) {
+        return -EINVAL;
+    }
+    width = param_width(kb, param);
     if (width < 0) {
         return width;
     }
@@ -546,6 +566,10 @@ int as_keyboard_get_keymatrix(struct as_keyboard *kb, uint32_t *codes)
         ret = as_keyboard_cmd(kb, AS_K_GET_KEYMATRIX, args, 2, 0, out,
                               HS_TIMEOUT_MS);
         if (ret < 0) {
+            goto fallback;
+        }
+        if (out[0] == AS_K_GET_KEYMATRIX && out[1] == (uint8_t)profile &&
+            out[2] == (uint8_t)page) {
             goto fallback;
         }
         for (int i = 0; i < 16; i++) {
@@ -923,7 +947,7 @@ int as_kb_snap_mode_of(const uint8_t *options, const uint8_t *pairs, int key)
 static int reset_key_mode(struct as_keyboard *kb, int32_t option, int key,
                           int save)
 {
-    int32_t value = option & ~AS_KB_OPTION_MODE_MASK;
+    int32_t value = option & ~(AS_KB_OPTION_MODE_MASK | AS_KB_OPTION_FULL_BOTTOM);
     int ret = set_key_values(kb, AS_K_MAG_OPTION, key, &value, 1, save);
 
     if (ret < 0) {
@@ -957,7 +981,20 @@ int as_keyboard_clear_snap(struct as_keyboard *kb, int key)
     if (!key_mode_is_snap(options[key])) {
         return 0;
     }
-    return reset_key_mode(kb, options[key], key, 1);
+    ret = reset_key_mode(kb, options[key], key, 1);
+    if (ret < 0) {
+        return ret;
+    }
+    if (as_keyboard_get_param(kb, AS_K_MAG_OPTION, options, AS_N(options)) < 0 ||
+        as_keyboard_get_param(kb, AS_K_MAG_SOCD_PAIR, pairs, AS_N(pairs)) < 0 ||
+        key_mode_is_snap(options[key]) || pairs[key] != 0) {
+        return -EIO;
+    }
+    if (partner >= 0 && partner < AS_KB_KEY_MAX && partner != key &&
+        pairs[partner] == key) {
+        return -EIO;
+    }
+    return 0;
 }
 
 int as_keyboard_set_snap(struct as_keyboard *kb, int key1, int key2, int mode,
@@ -1025,7 +1062,17 @@ int as_keyboard_set_snap(struct as_keyboard *kb, int key1, int key2, int mode,
         (ret = set_key_values(kb, AS_K_MAG_SOCD_PAIR, key1, &pair1, 1, 0))) {
         return ret;
     }
-    return set_key_values(kb, AS_K_MAG_SOCD_PAIR, key2, &pair2, 1, 1);
+    ret = set_key_values(kb, AS_K_MAG_SOCD_PAIR, key2, &pair2, 1, 1);
+    if (ret < 0) {
+        return ret;
+    }
+    if (as_keyboard_get_param(kb, AS_K_MAG_OPTION, options, AS_N(options)) < 0 ||
+        as_keyboard_get_param(kb, AS_K_MAG_SOCD_PAIR, pairs, AS_N(pairs)) < 0 ||
+        options[key1] != opt1 || options[key2] != opt2 ||
+        pairs[key1] != key2 || pairs[key2] != key1) {
+        return -EIO;
+    }
+    return 0;
 }
 
 /* ---------- key names ---------- */
@@ -1063,16 +1110,17 @@ void as_kb_key_name(unsigned code, char *buf, size_t len)
     } else if (code >= 45 && code <= 56) {
         name = punctuation_names[code - 45];
     } else if (code >= 58 && code <= 69) {
-        static char fkey[4];
+        char fkey[4];
 
         snprintf(fkey, sizeof(fkey), "F%d", code - 57);
-        name = fkey;
+        snprintf(buf, len, "%s", fkey);
+        return;
     } else if (code >= 73 && code <= 84) {
         name = nav_names[code - 73];
     } else if (code >= 224 && code <= 231) {
         name = modifier_names[code - 224];
     } else {
-        static char other[16];
+        char other[16];
 
         switch (code) {
         case 40: name = "Enter"; break;

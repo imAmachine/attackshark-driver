@@ -27,6 +27,7 @@ typedef enum {
 typedef struct {
     AsDeviceKind kind;
     char path[64];
+    char phys[96];
     char product[64];
     unsigned vid;
     unsigned pid;
@@ -65,6 +66,7 @@ typedef struct {
     int mag_mode;
     /* Every matrix position, so the page can configure one key at a time. */
     int key_code_valid;
+    int key_travel_valid;
     uint32_t key_code[AS_KB_KEY_MAX];
     uint8_t key_option[AS_KB_KEY_MAX];
     uint8_t key_pair[AS_KB_KEY_MAX];

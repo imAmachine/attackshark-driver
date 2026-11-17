@@ -31,6 +31,8 @@ unsigned as_ui_snap_dpi(unsigned dpi);
 /* HID usage of a GTK key value, 0 when the key has no simple mapping. Used
  * to find the same key on the layout the firmware addresses. */
 unsigned as_ui_hid_from_keyval(guint keyval);
+unsigned as_ui_hid_from_keycode(guint keycode);
+unsigned as_ui_hid_from_key(guint keyval, guint keycode);
 
 AdwActionRow *as_ui_value_row(const char *title);
 /* Row with minus/plus buttons around a slider. The value is kept in out and

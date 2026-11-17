@@ -1,6 +1,5 @@
 [Unit]
 Description=Apply the saved Attack Shark device profile
-After=multi-user.target
 
 [Service]
 Type=oneshot

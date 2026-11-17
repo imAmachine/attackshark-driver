@@ -25,10 +25,18 @@ static guint signals[N_SIGNALS];
 
 typedef struct {
     AsDeviceKind kind;
+    gint refs;
+    gint retired;
+    guint config_pending;
+    guint64 revision;
+    gboolean refreshing;
+    gboolean refresh_pending;
+    guint settle_id;
     int opened;
     unsigned vid;
     unsigned pid;
     char path[64];
+    char phys[96];
     struct as_mouse mouse;
     struct as_keyboard kb;
     /* Key names rarely change, so the matrix is read once per profile
@@ -41,9 +49,10 @@ typedef struct {
 struct _AsStore {
     GObject parent_instance;
     GPtrArray *devices;    /* AsDevice*, main thread only */
-    GHashTable *handles;   /* path -> Handle*, worker thread only */
+    GHashTable *handles;
     gboolean busy;
-    guint settle_id;
+    gboolean shutting_down;
+    gboolean refresh_pending;
     /* Travel demo: the main loop reads its own duplicate of the analog
      * report, so the worker is never on the demo's critical path. */
     gint analog_running;
@@ -78,6 +87,7 @@ static Handle *handle_new(const struct as_hid *hid)
 {
     Handle *h = g_new0(Handle, 1);
 
+    h->refs = 1;
     h->kind = (AsDeviceKind)classify(hid);
     h->vid = hid->vid;
     h->pid = hid->pid;
@@ -85,6 +95,7 @@ static Handle *handle_new(const struct as_hid *hid)
     h->kb.hid.fd = -1;
     h->kb.analog.fd = -1;
     g_strlcpy(h->path, hid->path, sizeof(h->path));
+    g_strlcpy(h->phys, hid->phys, sizeof(h->phys));
     return h;
 }
 
@@ -105,54 +116,48 @@ static void handle_destroy(gpointer data)
 {
     Handle *h = data;
 
+    if (!h || !g_atomic_int_dec_and_test(&h->refs)) {
+        return;
+    }
     handle_close(h);
     g_free(h);
 }
 
-/* The driver enumerates the family, so a node found by path may still open
- * another interface of the same device: only the exact node is accepted. */
 static int handle_open(Handle *h)
 {
     int rc;
+    struct as_hid *hid;
 
+    if (g_atomic_int_get(&h->retired)) {
+        return -ENODEV;
+    }
     if (h->opened) {
         return 0;
     }
-    if (h->kind == AS_DEVICE_MOUSE) {
-        rc = as_mouse_open(&h->mouse);
-        if (rc < 0) {
-            return rc;
-        }
-        if (strcmp(h->mouse.hid.path, h->path) != 0) {
-            as_mouse_close(&h->mouse);
-            return -ENODEV;
-        }
-    } else {
-        rc = as_keyboard_open(&h->kb);
-        if (rc < 0) {
-            return rc;
-        }
-        if (strcmp(h->kb.hid.path, h->path) != 0) {
-            as_keyboard_close(&h->kb);
-            return -ENODEV;
-        }
+    rc = h->kind == AS_DEVICE_MOUSE
+             ? as_mouse_open_path(&h->mouse, h->path)
+             : as_keyboard_open_path(&h->kb, h->path);
+    if (rc < 0) {
+        return rc;
     }
     h->opened = 1;
+    hid = h->kind == AS_DEVICE_MOUSE ? &h->mouse.hid : &h->kb.hid;
+    if (g_atomic_int_get(&h->retired) ||
+        (hid->vid && h->vid != hid->vid) ||
+        (hid->pid && h->pid != hid->pid) ||
+        (hid->phys[0] && h->phys[0] && strcmp(hid->phys, h->phys) != 0)) {
+        handle_close(h);
+        return -ENODEV;
+    }
     return 0;
 }
 
-/* Drops handles of devices that are gone; runs on the worker thread. */
-static void handles_prune(GHashTable *handles, GHashTable *present)
+static Handle *handle_ref(Handle *h)
 {
-    GHashTableIter iter;
-    gpointer key;
-
-    g_hash_table_iter_init(&iter, handles);
-    while (g_hash_table_iter_next(&iter, &key, NULL)) {
-        if (!g_hash_table_contains(present, key)) {
-            g_hash_table_iter_remove(&iter);
-        }
+    if (h) {
+        g_atomic_int_inc(&h->refs);
     }
+    return h;
 }
 
 /* --------------------------- snapshot filling -------------------------- */
@@ -163,6 +168,7 @@ static void fill_identity(AsDevice *dev, const Handle *h)
     g_strlcpy(dev->path, h->path, sizeof(dev->path));
     dev->vid = h->vid;
     dev->pid = h->pid;
+    g_strlcpy(dev->phys, h->phys, sizeof(dev->phys));
     if (h->kind == AS_DEVICE_MOUSE) {
         g_strlcpy(dev->product, as_mouse_model_name(h->pid),
                   sizeof(dev->product));
@@ -238,7 +244,7 @@ static void fill_keyboard(Handle *h, AsDevice *dev)
     dev->rate = st.report_rate;
     dev->debounce = st.debounce;
     dev->mag_mode = st.mag_mode;
-    if (st.mag_mode >= 0) {
+    if (st.profile >= 0 && st.mag_mode >= 0 && h->kb.mag_mult > 0) {
         int32_t act[AS_KB_KEY_MAX], rel[AS_KB_KEY_MAX], rtp[AS_KB_KEY_MAX];
         int32_t rtr[AS_KB_KEY_MAX], dz[AS_KB_KEY_MAX], opt[AS_KB_KEY_MAX];
         int32_t pair[AS_KB_KEY_MAX];
@@ -255,6 +261,7 @@ static void fill_keyboard(Handle *h, AsDevice *dev)
                                   AS_KB_KEY_MAX) == 0 &&
             as_keyboard_get_param(&h->kb, AS_K_MAG_OPTION, opt,
                                   AS_KB_KEY_MAX) == 0) {
+            dev->key_travel_valid = 1;
             for (int i = 0; i < AS_KB_KEY_MAX; i++) {
                 dev->key_option[i] = (uint8_t)opt[i];
                 dev->key_actuation[i] =
@@ -276,6 +283,8 @@ static void fill_keyboard(Handle *h, AsDevice *dev)
                     pair[i] >= 0 && pair[i] < AS_KB_KEY_MAX ? (uint8_t)pair[i]
                                                             : 0;
             }
+        } else {
+            dev->key_travel_valid = 0;
         }
         if (!h->matrix_valid || h->matrix_profile != st.profile) {
             h->matrix_valid =
@@ -313,12 +322,39 @@ static void fill_keyboard(Handle *h, AsDevice *dev)
     }
 }
 
-/* ------------------------------ scanning ------------------------------ */
+static void config_begin(AsStore *self, Handle *h);
+static void config_end(AsStore *self, Handle *h);
+static void store_request(AsStore *self, const char *path);
+
+static gboolean config_stop_stream(Handle *h, GError **error)
+{
+    int rc;
+
+    if (h && g_atomic_int_get(&h->retired)) {
+        g_set_error(error, G_IO_ERROR, G_IO_ERROR_NOT_FOUND,
+                    "device %s is no longer connected", h->path);
+        return FALSE;
+    }
+    if (!h || h->kind != AS_DEVICE_KEYBOARD || !h->kb.analog_open) {
+        return TRUE;
+    }
+    rc = as_keyboard_enable_stream(&h->kb, 0);
+    if (rc < 0) {
+        g_set_error(error, G_IO_ERROR, G_IO_ERROR_FAILED, "%s", as_strerror(rc));
+        return FALSE;
+    }
+    as_hid_close(&h->kb.analog);
+    h->kb.analog_open = 0;
+    return TRUE;
+}
 
 typedef struct {
     AsStore *store;
-    char *only_path;
+    Handle *handle;
     GPtrArray *devices;
+    guint64 revision;
+    struct as_hid found[16];
+    int count;
 } RefreshJob;
 
 static void refresh_job_free(gpointer data)
@@ -328,7 +364,8 @@ static void refresh_job_free(gpointer data)
     if (job->devices) {
         g_ptr_array_free(job->devices, TRUE);
     }
-    g_free(job->only_path);
+    handle_destroy(job->handle);
+    g_object_unref(job->store);
     g_free(job);
 }
 
@@ -353,74 +390,87 @@ static void refresh_handle(Handle *h, GPtrArray *out)
 static void refresh_job_run(gpointer data, GError **error)
 {
     RefreshJob *job = data;
-    GPtrArray *out = g_ptr_array_new_with_free_func(g_free);
 
-    if (job->only_path) {
-        Handle *h = g_hash_table_lookup(job->store->handles, job->only_path);
-
-        if (h) {
-            refresh_handle(h, out);
-        } else {
-            g_set_error(error, G_IO_ERROR, G_IO_ERROR_NOT_FOUND,
-                        "device %s is not connected", job->only_path);
+    if (!job->handle) {
+        job->count = as_hid_list_devices(job->found, G_N_ELEMENTS(job->found));
+        if (job->count < 0) {
+            g_set_error(error, G_IO_ERROR, G_IO_ERROR_FAILED, "%s",
+                        as_strerror(job->count));
         }
-    } else {
-        struct as_hid found[16];
-        GHashTable *present = g_hash_table_new(g_str_hash, g_str_equal);
-        /* One entry per physical device: the composite interfaces of a
-         * keyboard or mouse must not show up as extra devices. */
-        int n = as_hid_list_devices(found, 16);
-
-        for (int i = 0; i < n; i++) {
-            Handle *h = g_hash_table_lookup(job->store->handles, found[i].path);
-
-            if (!h) {
-                h = handle_new(&found[i]);
-                g_hash_table_insert(job->store->handles,
-                                    g_strdup(found[i].path), h);
-            }
-            g_hash_table_add(present, found[i].path);
-            refresh_handle(h, out);
-        }
-        handles_prune(job->store->handles, present);
-        g_hash_table_destroy(present);
+        return;
     }
-    job->devices = out;
+    if (!config_stop_stream(job->handle, error)) {
+        return;
+    }
+    job->devices = g_ptr_array_new_with_free_func(g_free);
+    refresh_handle(job->handle, job->devices);
 }
 
 static void store_merge(AsStore *self, GPtrArray *fresh)
 {
     GPtrArray *next = g_ptr_array_new_with_free_func(g_free);
 
+    for (guint i = 0; i < self->devices->len; i++) {
+        g_ptr_array_add(next, self->devices->pdata[i]);
+    }
+
     for (guint i = 0; i < fresh->len; i++) {
         AsDevice *dev = fresh->pdata[i];
         AsDevice *old = as_store_lookup(self, dev->path);
 
         if (old) {
+            if (old->kind == dev->kind && old->vid == dev->vid &&
+                old->pid == dev->pid && strcmp(old->phys, dev->phys) == 0 &&
+                old->profile == dev->profile &&
+                !dev->error[0]) {
+                if (!dev->usb_version_valid && old->usb_version_valid) {
+                    dev->usb_version_valid = 1;
+                    dev->usb_version = old->usb_version;
+                }
+                if (!dev->revision_valid && old->revision_valid) {
+                    dev->revision_valid = 1;
+                    dev->revision = old->revision;
+                }
+                if (!dev->side_light_mode_saved) {
+                    dev->side_light_mode_saved = old->side_light_mode_saved;
+                }
+                if (!dev->key_travel_valid) {
+                    memcpy(dev->key_option, old->key_option,
+                           sizeof(dev->key_option));
+                    memcpy(dev->key_pair, old->key_pair,
+                           sizeof(dev->key_pair));
+                    memcpy(dev->key_actuation, old->key_actuation,
+                           sizeof(dev->key_actuation));
+                    memcpy(dev->key_release, old->key_release,
+                           sizeof(dev->key_release));
+                    memcpy(dev->key_rt_press, old->key_rt_press,
+                           sizeof(dev->key_rt_press));
+                    memcpy(dev->key_rt_release, old->key_rt_release,
+                           sizeof(dev->key_rt_release));
+                    memcpy(dev->key_deadzone, old->key_deadzone,
+                           sizeof(dev->key_deadzone));
+                }
+            }
             *old = *dev;
             g_free(dev);
             dev = old;
         }
-        g_ptr_array_add(next, dev);
-    }
-    /* Devices that disappeared are not referenced by the new array anymore. */
-    for (guint i = 0; i < self->devices->len; i++) {
-        AsDevice *old = self->devices->pdata[i];
-
-        if (!g_ptr_array_find(next, old, NULL)) {
-            g_free(old);
+        if (!old) {
+            g_ptr_array_add(next, dev);
         }
     }
-    g_ptr_array_free(self->devices, FALSE);
+    g_free(g_ptr_array_free(self->devices, FALSE));
     self->devices = next;
 }
 
 static gboolean settle_cb(gpointer data)
 {
-    AsStore *self = data;
+    RefreshJob *job = data;
 
-    self->settle_id = 0;
-    as_store_scan(self);
+    job->handle->settle_id = 0;
+    if (g_hash_table_lookup(job->store->handles, job->handle->path) == job->handle) {
+        store_request(job->store, job->handle->path);
+    }
     return G_SOURCE_REMOVE;
 }
 
@@ -428,32 +478,113 @@ static void refresh_job_done(gpointer data, GError *error, gpointer user_data)
 {
     RefreshJob *job = data;
     AsStore *self = job->store;
+    Handle *h = job->handle;
 
     (void)user_data;
-    self->busy = FALSE;
-    if (job->devices) {
-        store_merge(self, job->devices);
-        g_ptr_array_free(job->devices, FALSE);
-        job->devices = NULL;
+    if (self->shutting_down) {
+        return;
     }
-    if (error) {
-        g_signal_emit(self, signals[SIGNAL_ERROR], 0, (const char *)NULL,
+    if (!h) {
+        self->busy = FALSE;
+        if (!error) {
+            GHashTable *present = g_hash_table_new(g_str_hash, g_str_equal);
+            GHashTableIter iter;
+            gpointer key, value;
+
+            for (int i = 0; i < job->count; i++) {
+                struct as_hid *hid = &job->found[i];
+                Handle *current = g_hash_table_lookup(self->handles, hid->path);
+
+                if (classify(hid) < 0) {
+                    continue;
+                }
+                g_hash_table_add(present, hid->path);
+                if (!current || current->kind != (AsDeviceKind)classify(hid) ||
+                    current->vid != hid->vid || current->pid != hid->pid ||
+                    strcmp(current->phys, hid->phys) != 0) {
+                    if (current) {
+                        g_atomic_int_set(&current->retired, TRUE);
+                    }
+                    if (current && strcmp(self->analog_path, current->path) == 0) {
+                        as_store_analog_stop(self);
+                    }
+                    if (current && current->settle_id) {
+                        g_source_remove(current->settle_id);
+                        current->settle_id = 0;
+                    }
+                    current = handle_new(hid);
+                    g_hash_table_replace(self->handles, g_strdup(hid->path), current);
+                    AsDevice *dev = g_new0(AsDevice, 1);
+                    GPtrArray *identity = g_ptr_array_new();
+                    fill_identity(dev, current);
+                    g_ptr_array_add(identity, dev);
+                    store_merge(self, identity);
+                    g_ptr_array_free(identity, TRUE);
+                }
+                store_request(self, hid->path);
+            }
+            g_hash_table_iter_init(&iter, self->handles);
+            while (g_hash_table_iter_next(&iter, &key, &value)) {
+                Handle *gone = value;
+
+                if (!g_hash_table_contains(present, key)) {
+                    g_atomic_int_set(&gone->retired, TRUE);
+                    if (strcmp(self->analog_path, gone->path) == 0) {
+                        as_store_analog_stop(self);
+                    }
+                    if (gone->settle_id) {
+                        g_source_remove(gone->settle_id);
+                        gone->settle_id = 0;
+                    }
+                    g_hash_table_iter_remove(&iter);
+                }
+            }
+            for (guint i = self->devices->len; i > 0; i--) {
+                AsDevice *dev = self->devices->pdata[i - 1];
+                if (!g_hash_table_contains(present, dev->path)) {
+                    g_ptr_array_remove_index(self->devices, i - 1);
+                }
+            }
+            g_hash_table_destroy(present);
+        }
+        if (self->refresh_pending) {
+            self->refresh_pending = FALSE;
+            as_store_scan(self);
+        }
+    } else {
+        h->refreshing = FALSE;
+        if (g_hash_table_lookup(self->handles, h->path) == h) {
+            if (job->devices && job->revision == h->revision) {
+                store_merge(self, job->devices);
+                g_ptr_array_set_free_func(job->devices, NULL);
+            } else if (job->revision != h->revision) {
+                h->refresh_pending = TRUE;
+            }
+            if (h->refresh_pending) {
+                h->refresh_pending = FALSE;
+                store_request(self, h->path);
+            }
+        }
+        config_end(self, h);
+    }
+    if (error && (!h || g_hash_table_lookup(self->handles, h->path) == h)) {
+        g_signal_emit(self, signals[SIGNAL_ERROR], 0, h ? h->path : NULL,
                       error->message);
     }
     g_signal_emit(self, signals[SIGNAL_CHANGED], 0);
 }
 
-/* Values can be clamped or rounded by the firmware, so a write is confirmed
- * against the hardware once, a couple of seconds after the user stopped
- * fiddling with the controls. Only a write schedules this: a scan that
- * rescheduled itself would keep the whole device busy forever and would push
- * the device's old values back into the widgets between writes. */
-static void schedule_settle(AsStore *self)
+static void schedule_settle(AsStore *self, Handle *h)
 {
-    if (self->settle_id) {
-        g_source_remove(self->settle_id);
+    RefreshJob *job = g_new0(RefreshJob, 1);
+
+    if (h->settle_id) {
+        g_source_remove(h->settle_id);
     }
-    self->settle_id = g_timeout_add_seconds(2, settle_cb, self);
+    job->store = g_object_ref(self);
+    job->handle = handle_ref(h);
+    h->settle_id = g_timeout_add_seconds_full(G_PRIORITY_DEFAULT, 2, settle_cb,
+                                             job, refresh_job_free);
 }
 
 /* ---------------------------- analog stream ---------------------------- */
@@ -461,6 +592,7 @@ static void schedule_settle(AsStore *self)
 typedef struct {
     AsStore *store;
     char *path;
+    Handle *handle;
     gint generation;
     int fd;
 } AnalogJob;
@@ -475,15 +607,21 @@ static void analog_job_free(gpointer data)
         close(job->fd);
     }
     g_free(job->path);
+    handle_destroy(job->handle);
+    g_object_unref(job->store);
     g_free(job);
 }
 
 static void analog_job_run(gpointer data, GError **error)
 {
     AnalogJob *job = data;
-    Handle *h = g_hash_table_lookup(job->store->handles, job->path);
+    Handle *h = job->handle;
     int rc;
 
+    if (job->generation != g_atomic_int_get(&job->store->analog_generation) ||
+        !g_atomic_int_get(&job->store->analog_running)) {
+        return;
+    }
     if (!h || h->kind != AS_DEVICE_KEYBOARD) {
         g_set_error(error, G_IO_ERROR, G_IO_ERROR_NOT_FOUND,
                     "keyboard %s is not connected", job->path);
@@ -573,7 +711,8 @@ static void analog_job_done(gpointer data, GError *error, gpointer user_data)
     AsStore *self = job->store;
 
     (void)user_data;
-    if (job->generation != g_atomic_int_get(&self->analog_generation) ||
+    if (self->shutting_down ||
+        job->generation != g_atomic_int_get(&self->analog_generation) ||
         !g_atomic_int_get(&self->analog_running)) {
         return;
     }
@@ -593,6 +732,7 @@ static void analog_job_done(gpointer data, GError *error, gpointer user_data)
 typedef struct {
     AsStore *store;
     char *path;
+    Handle *handle;
 } AnalogOff;
 
 static void analog_off_free(gpointer data)
@@ -600,16 +740,19 @@ static void analog_off_free(gpointer data)
     AnalogOff *off = data;
 
     g_free(off->path);
+    handle_destroy(off->handle);
+    g_object_unref(off->store);
     g_free(off);
 }
 
 static void analog_off_run(gpointer data, GError **error)
 {
     AnalogOff *off = data;
-    Handle *h = g_hash_table_lookup(off->store->handles, off->path);
+    Handle *h = off->handle;
 
     (void)error;
-    if (!h || h->kind != AS_DEVICE_KEYBOARD) {
+    if (!h || g_atomic_int_get(&h->retired) ||
+        h->kind != AS_DEVICE_KEYBOARD) {
         return;
     }
     /* The firmware keeps streaming even when a rescan has closed the local
@@ -628,7 +771,7 @@ gboolean as_store_analog_start(AsStore *self, const char *path)
     AnalogJob *job;
     AsDevice *dev = as_store_lookup(self, path);
 
-    if (!dev || dev->kind != AS_DEVICE_KEYBOARD) {
+    if (self->shutting_down || !dev || dev->kind != AS_DEVICE_KEYBOARD) {
         return FALSE;
     }
     if (g_atomic_int_get(&self->analog_running)) {
@@ -640,12 +783,22 @@ gboolean as_store_analog_start(AsStore *self, const char *path)
     for (int i = 0; i < AS_KB_KEY_MAX; i++) {
         g_atomic_int_set(&self->travel[i], 0);
     }
+    Handle *h = g_hash_table_lookup(self->handles, path);
+    if (!h) {
+        g_atomic_int_set(&self->analog_running, FALSE);
+        return FALSE;
+    }
+    if (h->config_pending) {
+        return TRUE;
+    }
     job = g_new0(AnalogJob, 1);
-    job->store = self;
+    job->store = g_object_ref(self);
+    job->handle = handle_ref(g_hash_table_lookup(self->handles, path));
     job->path = g_strdup(path);
     job->fd = -1;
     job->generation = g_atomic_int_get(&self->analog_generation);
-    as_job_run(analog_job_run, job, analog_job_free, analog_job_done, NULL, NULL);
+    as_job_run_for_device(job->path, analog_job_run, job, analog_job_free,
+                          analog_job_done, NULL, NULL);
     return TRUE;
 }
 
@@ -658,7 +811,8 @@ void as_store_analog_stop(AsStore *self)
         return;
     }
     off = g_new0(AnalogOff, 1);
-    off->store = self;
+    off->store = g_object_ref(self);
+    off->handle = handle_ref(g_hash_table_lookup(self->handles, self->analog_path));
     off->path = g_strdup(self->analog_path);
     g_atomic_int_set(&self->analog_running, FALSE);
     g_atomic_int_inc(&self->analog_generation);
@@ -674,7 +828,44 @@ void as_store_analog_stop(AsStore *self)
     for (int i = 0; i < AS_KB_KEY_MAX; i++) {
         g_atomic_int_set(&self->travel[i], 0);
     }
-    as_job_run(analog_off_run, off, analog_off_free, NULL, NULL, NULL);
+    as_job_run_for_device(off->path, analog_off_run, off, analog_off_free,
+                          NULL, NULL, NULL);
+}
+
+static void config_begin(AsStore *self, Handle *h)
+{
+    if (h->config_pending++ != 0 || strcmp(self->analog_path, h->path) != 0) {
+        return;
+    }
+    g_atomic_int_inc(&self->analog_generation);
+    if (self->analog_timer) {
+        g_source_remove(self->analog_timer);
+        self->analog_timer = 0;
+    }
+    if (self->analog_fd >= 0) {
+        close(self->analog_fd);
+        self->analog_fd = -1;
+    }
+}
+
+static void config_end(AsStore *self, Handle *h)
+{
+    AnalogJob *job;
+
+    if (--h->config_pending || self->shutting_down ||
+        g_hash_table_lookup(self->handles, h->path) != h ||
+        strcmp(self->analog_path, h->path) != 0 ||
+        !g_atomic_int_get(&self->analog_running)) {
+        return;
+    }
+    job = g_new0(AnalogJob, 1);
+    job->store = g_object_ref(self);
+    job->handle = handle_ref(h);
+    job->path = g_strdup(self->analog_path);
+    job->fd = -1;
+    job->generation = g_atomic_int_get(&self->analog_generation);
+    as_job_run_for_device(job->path, analog_job_run, job, analog_job_free,
+                          analog_job_done, NULL, NULL);
 }
 
 int as_store_travel(AsStore *self, const char *path, int key)
@@ -691,6 +882,7 @@ int as_store_travel(AsStore *self, const char *path, int key)
 typedef struct {
     AsStore *store;
     char *path;
+    Handle *handle;
     AsOpRequest req;
 } ApplyJob;
 
@@ -699,6 +891,8 @@ static void apply_job_free(gpointer data)
     ApplyJob *job = data;
 
     g_free(job->path);
+    handle_destroy(job->handle);
+    g_object_unref(job->store);
     g_free(job);
 }
 
@@ -780,15 +974,34 @@ static int apply_keyboard(struct as_keyboard *kb, const AsOpRequest *req)
     }
 }
 
+static gboolean operation_matches_kind(int op, AsDeviceKind kind)
+{
+    if (op >= AS_OP_MOUSE_RATE && op <= AS_OP_MOUSE_LIGHT) {
+        return kind == AS_DEVICE_MOUSE;
+    }
+    if (op >= AS_OP_KB_RATE && op <= AS_OP_KB_SIDE_LIGHT) {
+        return kind == AS_DEVICE_KEYBOARD;
+    }
+    return FALSE;
+}
+
 static void apply_job_run(gpointer data, GError **error)
 {
     ApplyJob *job = data;
-    Handle *h = g_hash_table_lookup(job->store->handles, job->path);
+    Handle *h = job->handle;
     int rc;
 
+    if (!config_stop_stream(h, error)) {
+        return;
+    }
     if (!h) {
         g_set_error(error, G_IO_ERROR, G_IO_ERROR_NOT_FOUND,
                     "device %s is not connected", job->path);
+        return;
+    }
+    if (!operation_matches_kind(job->req.op, h->kind)) {
+        g_set_error(error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT,
+                    "operation is not supported by this device");
         return;
     }
     rc = handle_open(h);
@@ -876,6 +1089,17 @@ static void apply_optimistic(AsDevice *dev, const AsOpRequest *req)
         dev->side_light_valid = 1;
         break;
     case AS_OP_KB_PROFILE:
+        if (dev->profile != req->value) {
+            dev->key_travel_valid = 0;
+            dev->key_code_valid = 0;
+            dev->side_light_mode_saved = 0;
+            memset(dev->key_option, 0, sizeof(dev->key_option));
+            memset(dev->key_actuation, 0, sizeof(dev->key_actuation));
+            memset(dev->key_release, 0, sizeof(dev->key_release));
+            memset(dev->key_rt_press, 0, sizeof(dev->key_rt_press));
+            memset(dev->key_rt_release, 0, sizeof(dev->key_rt_release));
+            memset(dev->key_deadzone, 0, sizeof(dev->key_deadzone));
+        }
         dev->profile = req->value;
         break;
     case AS_OP_KB_MAG_MODE:
@@ -898,11 +1122,13 @@ static void apply_optimistic(AsDevice *dev, const AsOpRequest *req)
         if (req->snap_disable) {
             int partner = dev->key_pair[key1];
 
-            dev->key_option[key1] &= (uint8_t)~AS_KB_OPTION_MODE_MASK;
+            dev->key_option[key1] &=
+                (uint8_t)~(AS_KB_OPTION_MODE_MASK | AS_KB_OPTION_FULL_BOTTOM);
             dev->key_pair[key1] = 0;
             if (partner < AS_KB_KEY_MAX && partner != key1 &&
                 dev->key_pair[partner] == key1) {
-                dev->key_option[partner] &= (uint8_t)~AS_KB_OPTION_MODE_MASK;
+                dev->key_option[partner] &=
+                    (uint8_t)~(AS_KB_OPTION_MODE_MASK | AS_KB_OPTION_FULL_BOTTOM);
                 dev->key_pair[partner] = 0;
             }
             break;
@@ -928,10 +1154,12 @@ static void apply_optimistic(AsDevice *dev, const AsOpRequest *req)
         }
         fixed = req->snap_full_bottom ? AS_KB_OPTION_FULL_BOTTOM : 0;
         dev->key_option[key1] =
-            (uint8_t)((dev->key_option[key1] & ~AS_KB_OPTION_MODE_MASK) |
+            (uint8_t)((dev->key_option[key1] &
+                       ~(AS_KB_OPTION_MODE_MASK | AS_KB_OPTION_FULL_BOTTOM)) |
                       mode1 | fixed);
         dev->key_option[key2] =
-            (uint8_t)((dev->key_option[key2] & ~AS_KB_OPTION_MODE_MASK) |
+            (uint8_t)((dev->key_option[key2] &
+                       ~(AS_KB_OPTION_MODE_MASK | AS_KB_OPTION_FULL_BOTTOM)) |
                       mode2 | fixed);
         dev->key_pair[key1] = (uint8_t)key2;
         dev->key_pair[key2] = (uint8_t)key1;
@@ -947,22 +1175,35 @@ static void apply_job_done(gpointer data, GError *error, gpointer user_data)
     ApplyJob *job = data;
 
     (void)user_data;
+    if (job->store->shutting_down) {
+        return;
+    }
+    if (g_hash_table_lookup(job->store->handles, job->path) != job->handle) {
+        g_signal_emit(job->store, signals[SIGNAL_OPERATION_COMPLETED], 0,
+                      job->path, job->req.op, job->req.request_id, FALSE);
+        config_end(job->store, job->handle);
+        return;
+    }
     if (error) {
         g_signal_emit(job->store, signals[SIGNAL_ERROR], 0, job->path,
                       error->message);
         g_signal_emit(job->store, signals[SIGNAL_OPERATION_COMPLETED], 0,
                       job->path, job->req.op, job->req.request_id, FALSE);
+        config_end(job->store, job->handle);
         return;
     }
     AsDevice *dev = as_store_lookup(job->store, job->path);
 
-    if (dev) {
+    if (dev && g_hash_table_lookup(job->store->handles, job->path) == job->handle) {
         apply_optimistic(dev, &job->req);
     }
     g_signal_emit(job->store, signals[SIGNAL_CHANGED], 0);
-    schedule_settle(job->store);
+    if (g_hash_table_lookup(job->store->handles, job->path) == job->handle) {
+        schedule_settle(job->store, job->handle);
+    }
     g_signal_emit(job->store, signals[SIGNAL_OPERATION_COMPLETED], 0,
                   job->path, job->req.op, job->req.request_id, TRUE);
+    config_end(job->store, job->handle);
 }
 
 /* -------------------------------- API --------------------------------- */
@@ -978,21 +1219,36 @@ AsStore *as_store_get(void)
     return instance;
 }
 
-/* One scan at a time: the worker serializes device access anyway, and a
- * queue of scans would only delay the answer the window is waiting for. */
 static void store_request(AsStore *self, const char *path)
 {
     RefreshJob *job;
+    Handle *h = path ? g_hash_table_lookup(self->handles, path) : NULL;
 
-    if (self->busy) {
+    if (self->shutting_down || (path && !h)) {
         return;
     }
-    self->busy = TRUE;
+    if (h ? h->refreshing : self->busy) {
+        if (h) {
+            h->refresh_pending = TRUE;
+        } else {
+            self->refresh_pending = TRUE;
+        }
+        return;
+    }
     job = g_new0(RefreshJob, 1);
-    job->store = self;
-    job->only_path = g_strdup(path);
-    as_job_run(refresh_job_run, job, refresh_job_free, refresh_job_done, NULL,
-               NULL);
+    job->store = g_object_ref(self);
+    job->handle = handle_ref(h);
+    if (h) {
+        h->refreshing = TRUE;
+        config_begin(self, h);
+        job->revision = h->revision;
+        as_job_run_for_device(path, refresh_job_run, job, refresh_job_free,
+                              refresh_job_done, NULL, NULL);
+    } else {
+        self->busy = TRUE;
+        as_job_run(refresh_job_run, job, refresh_job_free, refresh_job_done,
+                   NULL, NULL);
+    }
 }
 
 void as_store_scan(AsStore *self)
@@ -1051,6 +1307,9 @@ static void fix_permissions_done(gpointer data, GError *error,
 
     (void)user_data;
     self->busy = FALSE;
+    if (self->shutting_down) {
+        return;
+    }
     if (error) {
         g_signal_emit(self, signals[SIGNAL_ERROR], 0, (const char *)NULL,
                       error->message);
@@ -1063,12 +1322,12 @@ static void fix_permissions_done(gpointer data, GError *error,
 void as_store_fix_permissions(AsStore *self)
 {
     g_return_if_fail(AS_IS_STORE(self));
-    if (self->busy) {
+    if (self->shutting_down || self->busy) {
         return;
     }
     self->busy = TRUE;
-    as_job_run(fix_permissions_run, self, NULL, fix_permissions_done, NULL,
-               NULL);
+    as_job_run(fix_permissions_run, g_object_ref(self), g_object_unref,
+               fix_permissions_done, NULL, NULL);
 }
 
 gboolean as_store_apply(AsStore *self, const char *path, const AsOpRequest *req)
@@ -1076,19 +1335,36 @@ gboolean as_store_apply(AsStore *self, const char *path, const AsOpRequest *req)
     ApplyJob *job;
 
     g_return_val_if_fail(AS_IS_STORE(self), FALSE);
-    if (!as_store_lookup(self, path)) {
+    AsDevice *dev = path ? as_store_lookup(self, path) : NULL;
+
+    if (self->shutting_down || !dev || !req ||
+        !operation_matches_kind(req->op, dev->kind)) {
         return FALSE;
     }
+    Handle *h = g_hash_table_lookup(self->handles, path);
+    if (!h) {
+        struct as_hid hid = { .vid = dev->vid, .pid = dev->pid };
+        g_strlcpy(hid.path, dev->path, sizeof(hid.path));
+        g_strlcpy(hid.phys, dev->phys, sizeof(hid.phys));
+        h = handle_new(&hid);
+        h->kind = dev->kind;
+        g_hash_table_insert(self->handles, g_strdup(path), h);
+    }
+    h->revision++;
+    config_begin(self, h);
     job = g_new0(ApplyJob, 1);
-    job->store = self;
+    job->store = g_object_ref(self);
+    job->handle = handle_ref(g_hash_table_lookup(self->handles, path));
     job->path = g_strdup(path);
     job->req = *req;
-    as_job_run(apply_job_run, job, apply_job_free, apply_job_done, NULL, NULL);
+    as_job_run_for_device(path, apply_job_run, job, apply_job_free,
+                          apply_job_done, NULL, NULL);
     return TRUE;
 }
 
 void as_store_shutdown(AsStore *self)
 {
+    self->shutting_down = TRUE;
     g_atomic_int_set(&self->analog_running, FALSE);
     g_atomic_int_inc(&self->analog_generation);
     if (self->analog_timer) {
@@ -1099,9 +1375,16 @@ void as_store_shutdown(AsStore *self)
         close(self->analog_fd);
         self->analog_fd = -1;
     }
-    if (self->settle_id) {
-        g_source_remove(self->settle_id);
-        self->settle_id = 0;
+    GHashTableIter iter;
+    gpointer value;
+    g_hash_table_iter_init(&iter, self->handles);
+    while (g_hash_table_iter_next(&iter, NULL, &value)) {
+        Handle *h = value;
+        g_atomic_int_set(&h->retired, TRUE);
+        if (h->settle_id) {
+            g_source_remove(h->settle_id);
+            h->settle_id = 0;
+        }
     }
     g_hash_table_remove_all(self->handles);
 }
@@ -1115,9 +1398,6 @@ static void as_store_finalize(GObject *object)
     }
     if (self->analog_fd >= 0) {
         close(self->analog_fd);
-    }
-    if (self->settle_id) {
-        g_source_remove(self->settle_id);
     }
     g_hash_table_destroy(self->handles);
     g_ptr_array_free(self->devices, TRUE);
