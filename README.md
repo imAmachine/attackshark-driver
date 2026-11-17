@@ -1,4 +1,4 @@
-# attackshark-driver
+# attackshark-linux-driver
 
 Нативный Linux-драйвер для периферии Attack Shark, которая официально
 поддерживается только веб-драйверами (WebHID). Работает напрямую через
