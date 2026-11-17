@@ -51,6 +51,8 @@ typedef struct {
     int motion_sync;
     int angle_snap;
     int ripple;
+    int performance_state;
+    int performance;
     int profile;
     int fw_valid;
     int fw_major;
@@ -100,6 +102,8 @@ enum {
     AS_OP_MOUSE_MOTION_SYNC,
     AS_OP_MOUSE_ANGLE_SNAP,
     AS_OP_MOUSE_RIPPLE,
+    AS_OP_MOUSE_PERFORMANCE_STATE,
+    AS_OP_MOUSE_PERFORMANCE,
     AS_OP_MOUSE_LIGHT,
     AS_OP_KB_RATE,
     AS_OP_KB_PROFILE,

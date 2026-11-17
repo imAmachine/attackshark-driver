@@ -217,6 +217,8 @@ static void fill_mouse(Handle *h, AsDevice *dev)
     dev->motion_sync = valid ? st.motion_sync : -1;
     dev->angle_snap = valid ? st.angle_snap : -1;
     dev->ripple = valid ? st.ripple : -1;
+    dev->performance_state = valid ? st.performance_state : -1;
+    dev->performance = valid ? st.performance : -1;
     dev->profile = valid ? st.profile : -1;
     dev->fw_valid = st.version_valid;
     dev->fw_major = st.version_major;
@@ -946,6 +948,10 @@ static int apply_mouse(struct as_mouse *mouse, const AsOpRequest *req)
         return as_mouse_set_u8(mouse, AS_M_ANGLE_SNAP, req->value ? 1 : 0);
     case AS_OP_MOUSE_RIPPLE:
         return as_mouse_set_u8(mouse, AS_M_RIPPLE, req->value ? 1 : 0);
+    case AS_OP_MOUSE_PERFORMANCE_STATE:
+        return as_mouse_set_u8(mouse, AS_M_PERFORMANCE_STATE, req->value ? 1 : 0);
+    case AS_OP_MOUSE_PERFORMANCE:
+        return as_mouse_set_u8(mouse, AS_M_PERFORMANCE, (uint8_t)req->value);
     case AS_OP_MOUSE_LIGHT:
         return as_mouse_set_light(mouse, (uint8_t)req->light_mode, req->rgb[0],
                                   req->rgb[1], req->rgb[2],
@@ -1094,6 +1100,12 @@ static void apply_optimistic(AsDevice *dev, const AsOpRequest *req)
         break;
     case AS_OP_MOUSE_RIPPLE:
         dev->ripple = req->value;
+        break;
+    case AS_OP_MOUSE_PERFORMANCE_STATE:
+        dev->performance_state = req->value;
+        break;
+    case AS_OP_MOUSE_PERFORMANCE:
+        dev->performance = req->value;
         break;
     case AS_OP_KB_LIGHT_POWER:
         dev->light_on = req->light_on;

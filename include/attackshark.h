@@ -98,6 +98,8 @@ enum as_mouse_offset {
     AS_M_SLEEP_TIME = 173,
     AS_M_ANGLE_SNAP = 175,
     AS_M_RIPPLE = 177,
+    AS_M_PERFORMANCE_STATE = 181,
+    AS_M_PERFORMANCE = 183,
 };
 
 struct as_mouse_state {
@@ -114,6 +116,8 @@ struct as_mouse_state {
     int motion_sync;
     int angle_snap;
     int ripple;
+    int performance_state;
+    int performance;
     int sleep_time;
     int profile;
     int version_valid;

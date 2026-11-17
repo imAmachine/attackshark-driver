@@ -423,7 +423,8 @@ int as_mouse_read_state(struct as_mouse *m, struct as_mouse_state *st)
     /* Everything below lives in the mouse and needs the RF link up. */
     if (!st->online) {
         st->report_rate = st->lod = st->debounce = st->motion_sync =
-            st->angle_snap = st->ripple = st->sleep_time = st->profile = -1;
+            st->angle_snap = st->ripple = st->performance_state =
+            st->performance = st->sleep_time = st->profile = -1;
         return 0;
     }
 
@@ -448,6 +449,8 @@ int as_mouse_read_state(struct as_mouse *m, struct as_mouse_state *st)
     st->motion_sync = raw[AS_M_MOTION_SYNC];
     st->angle_snap = raw[AS_M_ANGLE_SNAP];
     st->ripple = raw[AS_M_RIPPLE];
+    st->performance_state = raw[AS_M_PERFORMANCE_STATE];
+    st->performance = raw[AS_M_PERFORMANCE];
     st->sleep_time = raw[AS_M_SLEEP_TIME];
     st->light_mode = raw[AS_M_LIGHT];
     memcpy(st->light_color, raw + AS_M_LIGHT + 1, sizeof(st->light_color));

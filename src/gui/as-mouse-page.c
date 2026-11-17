@@ -22,6 +22,8 @@ typedef struct {
     AdwSwitchRow *sw_motion;
     AdwSwitchRow *sw_angle;
     AdwSwitchRow *sw_ripple;
+    AdwSwitchRow *sw_performance;
+    AdwSpinRow *row_performance;
     AdwPreferencesGroup *sensor_group;
 } AsMousePage;
 
@@ -183,6 +185,13 @@ static void update_page(AsMousePage *p)
     if (dev->ripple >= 0) {
         as_ui_switch_set(p->sw_ripple, &p->page.updating, dev->ripple);
     }
+    if (dev->performance_state >= 0) {
+        as_ui_switch_set(p->sw_performance, &p->page.updating,
+                         dev->performance_state);
+    }
+    if (dev->performance >= 0) {
+        as_ui_spin_set(p->row_performance, &p->page.updating, dev->performance);
+    }
 
     p->page.updating = FALSE;
 }
@@ -272,6 +281,9 @@ static AdwPreferencesGroup *build_sensor(AsMousePage *p)
     p->sw_motion = switch_row(p, "Motion sync", AS_OP_MOUSE_MOTION_SYNC);
     p->sw_angle = switch_row(p, "Angle snap", AS_OP_MOUSE_ANGLE_SNAP);
     p->sw_ripple = switch_row(p, "Ripple control", AS_OP_MOUSE_RIPPLE);
+    p->sw_performance = switch_row(p, "Hunting Shark", AS_OP_MOUSE_PERFORMANCE_STATE);
+    p->row_performance = spin_row(p, "Время Hunting Shark", AS_OP_MOUSE_PERFORMANCE,
+                                  1, 90, 1, "секунд");
     return group;
 }
 
